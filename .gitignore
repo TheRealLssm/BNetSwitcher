@@ -6,6 +6,14 @@
 # PowerShell logs
 *.log
 
+# Local user data - MUST never be committed (accounts, BattleTags, notes)
+accounts.json
+battletags.json
+settings.json
+removed-accounts.json
+rankicons/
+*.backup
+
 # IDE
 .vscode/
 *.code-workspace

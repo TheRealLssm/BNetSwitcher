@@ -1,121 +1,170 @@
-# Battle.net Account Switcher
+# Battle.net Account Switcher — Dark Edition
 
-A lightweight GUI tool to quickly switch between Battle.net accounts on Windows.
+A fast, dark-themed GUI for switching between Battle.net accounts on Windows, with live Overwatch 2 rank display.
+
+> **Fork notice** — this is a fork of [**BNetSwitcher** by Nepero27182](https://github.com/Nepero27182/BNetSwitcher).
+> All credit for the original tool and the core switching approach goes to them. This fork rewrites the GUI,
+> fixes the rank lookup, and adds account management. The original is licensed "use as you wish".
+
+---
+
+## Why this fork exists
+
+The original tool worked, but the rank column never populated. Three separate bugs caused that, all fixed here:
+
+1. **TLS.** PowerShell 5.1 defaults to TLS 1.0, which the rank API rejects — every lookup failed silently. Now forces TLS 1.2.
+2. **Wrong field name.** The code read `open_queue`; the API actually calls it `open`.
+3. **Obsolete schema.** It parsed SR/`value` fields that no longer exist in Overwatch 2. Ranks are now division + tier (e.g. `Diamond 3`).
+
+---
 
 ## Features
 
-- **Automatic Dark Mode Detection**: Matches the GUI to your Windows light/dark preference on launch.
-- **BattleTag & Rank Tracking**: Add a BattleTag per account and automatically fetch Tank/DPS/Support/Open Queue SR via the OverFast API (requires internet access) when the window opens.
-- **Persistent BattleTags**: Tags are saved per account in `%APPDATA%\BNetSwitcher\battletags.json`, so EXE builds remain portable.
-- **Account Reordering**: Switching moves the selected account to the top of the config for faster follow-up launches.
-- **Silent Operation**: No console window; ideal for background use or pinned taskbar shortcuts.
-- **Data Grid with Double-Click Support**: Inline edit BattleTags, inspect ranks, and double-click any row to switch instantly.
-- **Auto-Launch & Cleanup**: Stops the current Battle.net process, launches it again, and closes the GUI automatically.
-- **Config Backup**: Creates backups of `Battle.net.config` before every change for safety.
+### Account switching
+- One-click switching — the selected account moves to the top of `SavedAccountNames`, which is the account Battle.net logs into next.
+- Double-click a row, press `Enter`, or use the Switch button.
+- Automatically closes Battle.net (and optionally Overwatch), then relaunches.
+- Optionally launches **Overwatch 2 directly**, skipping the launcher's Play button.
+- Creates a `.backup` of `Battle.net.config` before every write.
 
-## Quick Start Guide
+### Overwatch 2 ranks
+- Shows **Tank / Damage / Support / Open Queue** rank per account, with the official Blizzard rank badge next to each.
+- Rank icons are downloaded once and cached locally in `%APPDATA%\BNetSwitcher\rankicons`.
+- Fetching runs on background threads, so the window never freezes.
+- PC and Console rank support.
+- Data comes from the public [OverFast API](https://overfast-api.tekrop.fr).
 
-Follow this guide every time you want to switch between accounts:
+> You enter each account's BattleTag once (`Name#1234`). Battle.net only stores emails, and a BattleTag
+> cannot be derived from an email locally — so a one-time entry per account is unavoidable.
 
-### Step 1: Launch the Tool
-Run `bnet-switcher.exe` (or `.\bnet-switcher-gui.ps1` if using PowerShell). The grid will populate with every account found in your Battle.net config.
+### Account management
+- **Remove accounts** — purges the entry from `Battle.net.config` and deletes its saved BattleTag/status here.
+  Writes a `.backup` first, plus a `removed-accounts.json` recovery log. Refuses to remove your last account,
+  and warns if Battle.net is running (it rewrites its config on exit and would restore the entry).
+- **Status flags** — mark an account **OK / Watch / Suspended / Banned**, with a free-text note and an optional
+  suspension end date that counts down in the grid. Switching into a flagged account requires confirmation.
 
-### Step 2: Add or Update BattleTags (Optional)
-- Click inside the **BattleTag** column next to an account to add or edit a tag (format: `Name#1234`).
-- BattleTags save automatically to `%APPDATA%\BNetSwitcher\battletags.json` so the tool can write even when located in Program Files.
+> **On ban detection:** this app cannot detect bans, and does not pretend to. Blizzard publishes no ban or
+> suspension data, and no public API exposes it — the OverFast schema has no such field. The only available
+> signal is a `404`, which equally means a typo'd BattleTag, a renamed account, a private profile, or an account
+> that never played Overwatch. Auto-flagging on that would label working accounts as banned. **Status flags are
+> set by you, manually**, which is why they're trustworthy.
 
-### Step 3: Let Ranks Load
-- After the window opens, the tool calls the OverFast API for every BattleTag.
-- Tank, DPS, Support, and Open Queue ranks fill in as soon as the responses arrive (placeholders show “Pending…” while loading).
+### Interface
+- Dark mode by default, including a proper dark title bar. Light and Auto (follow Windows) also available.
+- Resizable window that remembers its size.
+- Active account marked with a coloured ●.
+- **Streamer mode** — masks account emails (`ab•••`) so they never appear on stream.
+- Right-click any row for switch / status / refresh / copy email / remove.
+- Status bar, per-cell tooltips, `F5` to refresh ranks, `Del` to remove.
 
-### Step 4: Switch Accounts
-- Select any row (or keep the first selection) and click **"Switch Account"** or simply double-click the account name.
-- Battle.net closes, the config updates, and the launcher restarts under the chosen account.
+---
 
-### Step 5: Repeat for All Accounts
-- Continue steps 3-4 for each account you want to log into
-- The tool automatically:
-  - Closes the current Battle.net process
-  - Reorders accounts so your most-used ones appear at the top
-  - Creates backups of your config file for safety
+## Install
 
-### Tips
-- **Most Recent Account**: The account you switched to will move to the top of the list next time
-- **Mouse Shortcut**: Double-click any account to switch instantly
-- **Safe Switching**: All account switches are backed up automatically
-- **No Password Storage**: The tool never saves passwords - Battle.net handles authentication
+### Recommended: build it yourself
 
-### Rank API
-- BattleTag ranks come from the public [OverFast API](https://overfast-api.tekrop.fr) and require an active internet connection.
-- If you block the API or run fully offline, the Tank/DPS/Support/Open Queue cells will show “Pending…” or “Not Found” but account switching still works.
-- Avoid spamming updates; the API has rate limits and may temporarily block excessive requests.
+Prebuilt PowerShell executables are frequently flagged as false positives by antivirus, because
+[PS2EXE](https://github.com/MScholtes/PS2EXE) packaging is a technique malware also uses. Rather than asking you
+to trust a binary from a stranger, **build your own from source in about ten seconds**:
 
-## Build System
+```powershell
+git clone https://github.com/YOUR_USERNAME/YOUR_REPO.git
+cd YOUR_REPO
+.\build.ps1
+```
 
-The `build.ps1` script automatically:
-- Detects or installs the `ps2exe` PowerShell module
-- Compiles to 64-bit architecture
-- Disables console window appearance
-- Supports optional custom icons
-- Verifies the output and reports file size
+`build.ps1` installs the `ps2exe` module if needed and produces `bnet-switcher.exe` next to the script.
 
-**Result:**
-- **Output:** `bnet-switcher.exe`
-- **Platform:** Windows x64
-- **Execution:** No console window, silent operation
+If module installation fails, run this once and retry:
+
+```powershell
+Install-Module ps2exe -Scope CurrentUser -Force
+```
+
+### No build required
+
+You can skip the EXE entirely and run the script directly — right-click `bnet-switcher-gui.ps1` →
+**Run with PowerShell**, or make a shortcut to:
+
+```
+powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File "C:\path\to\bnet-switcher-gui.ps1"
+```
+
+Keep `bnet-switcher.ico` beside the script if you want the window icon.
+
+---
 
 ## Requirements
 
 - Windows 10 or later
-- Battle.net installed and launched at least once
-- PowerShell 5.0+ (for PS1 version)
-- .NET Framework (included on all Windows 10+)
+- PowerShell 5.1 (ships with Windows) or newer
+- Battle.net installed, and each account logged into at least once so it appears in the saved list
+- Internet connection for rank lookups only — switching works fully offline
+
+---
+
+## Files this app touches
+
+| Path | Purpose |
+|---|---|
+| `%APPDATA%\Battle.net\Battle.net.config` | Read + write `Client.SavedAccountNames` only |
+| `%APPDATA%\Battle.net\Battle.net.config.backup` | Automatic backup before every write |
+| `%APPDATA%\BNetSwitcher\accounts.json` | Your BattleTags, status flags and notes |
+| `%APPDATA%\BNetSwitcher\settings.json` | App settings |
+| `%APPDATA%\BNetSwitcher\rankicons\` | Cached rank badge images |
+| `%APPDATA%\BNetSwitcher\removed-accounts.json` | Recovery log of removed accounts |
+
+Nothing is written inside the repo folder, so your account data can never end up in a commit.
+
+---
+
+## Privacy & safety
+
+- **No passwords, ever.** The app never reads, stores, or transmits credentials. Battle.net handles all authentication.
+- **No telemetry.** No analytics, no tracking, no phone-home.
+- **Two network calls only**, and only for accounts where *you* entered a BattleTag:
+  1. `overfast-api.tekrop.fr` — public rank lookup
+  2. `static.playoverwatch.com` — Blizzard's CDN, for rank badge images
+- **Backups before every config write.**
+- **Open source.** It's plain PowerShell — read exactly what it does before you run it.
+
+### Is this against Blizzard's rules?
+
+This tool reorders a list in your own local config file — the same result as logging out and picking a different
+saved account by hand. It does not touch the game client, read game memory, automate input, or interact with
+Blizzard's servers in any unofficial way. It is a convenience wrapper around actions you can already perform manually.
+
+That said, it is an unofficial community tool: use it at your own risk.
+
+---
 
 ## Troubleshooting
 
-### "Battle.net.config not found!" Error
-- Ensure Battle.net is installed: `C:\Program Files (x86)\Battle.net\`
-- Ensure Battle.net has been launched at least once
-- Config file location: `%APPDATA%\Battle.net\Battle.net.config`
+**"Battle.net.config not found"** — install Battle.net and launch it at least once.
 
-### Build script fails to install ps2exe
-- Manually install with: `Install-Module ps2exe -Scope CurrentUser`
-- Or download from: https://github.com/MScholtes/PS2EXE/releases
+**Ranks show "Not found"** — check the BattleTag format (`Name#1234`, case-sensitive). A profile that has never
+played competitive Overwatch, or a private profile, will also return not-found. This says nothing about ban status.
 
-### GUI doesn't detect dark mode
-- Requires Windows 10 build 1809 or later
-- Check: Settings > Personalization > Colors > Choose your mode
-- Falls back to light mode if detection fails
+**Ranks show "Rate limited"** — the public API has rate limits. Wait a minute and press `F5`.
 
-### Battle.net doesn't launch with the new account
-- Ensure Battle.net is installed at the default location: `C:\Program Files (x86)\Battle.net\Battle.net Launcher.exe`
-- Try running the GUI as Administrator
-- Check that you have permission to modify the config file
+**A removed account came back** — Battle.net was running and rewrote its config on exit. Close Battle.net, then remove again.
 
-## Author
+**Windows Defender flags the EXE** — that's the PS2EXE false positive described above. Build it yourself from
+source, or skip the EXE and run the `.ps1` directly.
 
-Created by Nepero
+---
 
-## Legal & Privacy
+## Credits
 
-### ✅ 100% Legal
-This tool is a utility for managing your own Battle.net accounts. It only:
-- Reads and modifies **your local** Battle.net configuration file
-- Manages processes on your local machine
-- Does not interact with Blizzard's servers in any unauthorized way
-- Only performs the same actions you would manually do by logging in/out
+- Original tool: [**Nepero27182/BNetSwitcher**](https://github.com/Nepero27182/BNetSwitcher)
+- Rank data: [OverFast API](https://overfast-api.tekrop.fr) by TeKrop
+- EXE packaging: [PS2EXE](https://github.com/MScholtes/PS2EXE) by Markus Scholtes
+- Rank badge images: © Blizzard Entertainment, served from Blizzard's public CDN
 
-### 🔒 Privacy & Security
-- **No data collection** - Your account information never leaves your computer
-- **No telemetry** - No usage tracking or analytics
-- **Local operation only** - All operations happen on your machine
-- **Open source** - You can inspect the PowerShell code to verify what it does
-- **Config backups** - Automatic backups created before any changes for safety
-- **Optional OverFast API call** - Only the BattleTag rank lookup reaches the OverFast API; remove BattleTags or disable ranks to remain fully offline.
-
-### ⚖️ Disclaimer
-This is a community tool. Use at your own risk. Always keep backups of important files. The author is not responsible for any account access issues or data loss.
+Overwatch and Battle.net are trademarks of Blizzard Entertainment, Inc. This project is not affiliated with,
+endorsed by, or associated with Blizzard Entertainment.
 
 ## License
 
-Use as you wish.
+Use as you wish — same terms as the original project.
