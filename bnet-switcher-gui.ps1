@@ -83,6 +83,11 @@ try {
     foreach ($d in @($script:DataFolder, $script:IconCacheDir, $script:PlayerIconDir, $script:ProfileDir)) {
         if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
     }
+    # Sweep partial downloads left behind by an interrupted run
+    foreach ($d in @($script:IconCacheDir, $script:PlayerIconDir)) {
+        Get-ChildItem $d -Filter '*.part' -File -ErrorAction SilentlyContinue |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    }
 } catch { }
 
 # Non-ASCII glyphs built from char codes so file encoding can never garble them
@@ -522,7 +527,12 @@ function Get-CachedImage {
         $img = [System.Drawing.Image]::FromStream($ms)
         $script:ImageCache[$Path] = $img
         return $img
-    } catch { return $null }
+    } catch {
+        # Truncated or corrupt cache entry: drop it so the next refresh re-downloads
+        try { Remove-Item $Path -Force -ErrorAction SilentlyContinue } catch { }
+        Write-DebugLog "Discarded unreadable cached image: $Path"
+        return $null
+    }
 }
 
 #--------------------------------------
@@ -541,19 +551,39 @@ $result = @{
 }
 $dash = [string][char]0x2013
 
-# Download an image once and return its local cached path
+# Download an image once and return its local cached path.
+#
+# Downloads land in a unique temp file and are then moved into place. Accounts
+# very often share the same image - default namecards, default avatars, and rank
+# badges are identical across accounts at the same rank - so several parallel
+# fetches would otherwise write the same destination at once and all but one
+# would die with "file is being used by another process", silently losing that
+# account's icon.
 function Get-RemoteImage {
     param($Url, $Dir, $Prefix)
     if (-not $Url) { return '' }
     try {
         $fname = [System.IO.Path]::GetFileName(([Uri]$Url).AbsolutePath)
-        $fname = "$Prefix-" + ($fname -replace '[^A-Za-z0-9_.-]', '_')
+        $fname = ($fname -replace '[^A-Za-z0-9_.-]', '_')
+        if ($Prefix) { $fname = "$Prefix-$fname" }
         $path = Join-Path $Dir $fname
-        if (-not (Test-Path $path)) {
-            Invoke-WebRequest -Uri $Url -OutFile $path -UseBasicParsing -TimeoutSec 15
+        if (Test-Path $path) { return $path }
+
+        $tmp = Join-Path $Dir ('tmp-' + [Guid]::NewGuid().ToString('N') + '.part')
+        Invoke-WebRequest -Uri $Url -OutFile $tmp -UseBasicParsing -TimeoutSec 30
+
+        if (Test-Path $path) {
+            # Another fetch won the race; its copy is just as good
+            Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+        } else {
+            try { Move-Item $tmp $path -Force }
+            catch { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
         }
-        return $path
-    } catch { return '' }
+        if (Test-Path $path) { return $path }
+        return ''
+    } catch {
+        return ''
+    }
 }
 
 $normalized = ($BattleTag.Trim() -replace '\s', '') -replace '#', '-'
@@ -585,17 +615,8 @@ try {
             $div = ([string]$node.division)
             $div = $div.Substring(0, 1).ToUpper() + $div.Substring(1)
             $text = "$div $($node.tier)"
-            $iconPath = ''
-            if ($node.rank_icon) {
-                try {
-                    $fname = [System.IO.Path]::GetFileName(([Uri]$node.rank_icon).AbsolutePath)
-                    $fname = $fname -replace '[^A-Za-z0-9_.-]', '_'
-                    $iconPath = Join-Path $CacheDir $fname
-                    if (-not (Test-Path $iconPath)) {
-                        Invoke-WebRequest -Uri $node.rank_icon -OutFile $iconPath -UseBasicParsing -TimeoutSec 15
-                    }
-                } catch { $iconPath = '' }
-            }
+            # Rank badges are shared by every account at that rank - same race
+            $iconPath = Get-RemoteImage $node.rank_icon $CacheDir ''
             $result.Roles[$col] = @{ Text = $text; Icon = $iconPath }
         } else {
             $result.Roles[$col] = @{ Text = $dash; Icon = '' }
