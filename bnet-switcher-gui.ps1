@@ -1522,6 +1522,284 @@ function Show-ProfilesDialog {
 }
 
 #--------------------------------------
+# BATTLETAG IMPORT / EXPORT
+#
+#   BattleTags cannot be auto-discovered: Battle.net stores only login
+#   emails locally and fetches everything else from Blizzard at runtime.
+#   Nothing on disk maps an account to its BattleTag. So the fastest path
+#   is bulk entry plus validation against the API, which catches the very
+#   common case of a mistyped discriminator.
+#--------------------------------------
+function Parse-TagImport {
+    param([string]$Text)
+    $entries = @()
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $entries }
+
+    $bare = @()
+    foreach ($rawLine in ($Text -split "`r?`n")) {
+        $line = $rawLine.Trim()
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        if ($line.StartsWith('#')) { continue }
+
+        # "email <sep> tag" where sep is = , ; tab or 2+ spaces
+        if ($line -match '^(.*?)\s*[=,;\t]\s*(.+)$' -or $line -match '^(\S+@\S+)\s{2,}(.+)$') {
+            $left = $Matches[1].Trim()
+            $right = $Matches[2].Trim()
+            if ($left -match '@' -or $script:Accounts -contains $left) {
+                $entries += [pscustomobject]@{ Account = $left; Tag = $right; Source = 'mapped' }
+                continue
+            }
+        }
+        $bare += $line
+    }
+
+    # Bare tags fill accounts in listed order
+    if ($bare.Count -gt 0) {
+        $i = 0
+        foreach ($acct in $script:Accounts) {
+            if ($i -ge $bare.Count) { break }
+            if ($entries | Where-Object { $_.Account -eq $acct }) { continue }
+            $entries += [pscustomobject]@{ Account = $acct; Tag = $bare[$i]; Source = 'by order' }
+            $i++
+        }
+    }
+    return $entries
+}
+
+function Test-BattleTagExists {
+    param([string]$Tag)
+    $n = ($Tag.Trim() -replace '\s','') -replace '#','-'
+    $n = [Uri]::EscapeDataString($n)
+    try {
+        $null = Invoke-RestMethod -Uri "https://overfast-api.tekrop.fr/players/$n/summary" -UseBasicParsing -TimeoutSec 12
+        return 'OK'
+    } catch {
+        if ([string]$_.Exception.Message -match '404') { return 'No profile' }
+        return 'Check failed'
+    }
+}
+
+function Show-ImportDialog {
+    $c = $script:Colors
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text = 'Import / export BattleTags'
+    $dlg.FormBorderStyle = 'Sizable'
+    $dlg.MaximizeBox = $false; $dlg.MinimizeBox = $false
+    $dlg.StartPosition = 'CenterParent'
+    $dlg.Size = New-Object System.Drawing.Size(720, 600)
+    $dlg.MinimumSize = New-Object System.Drawing.Size(660, 520)
+    $dlg.BackColor = $c.FormBack; $dlg.ForeColor = $c.Fore
+    $dlg.Font = New-Object System.Drawing.Font('Segoe UI', 10)
+    $dlg.Add_Shown({ Set-DarkTitleBar -TargetForm $this -Dark $script:Colors.IsDark })
+
+    $lbl = New-Object System.Windows.Forms.Label
+    $lbl.Text = "Paste one entry per line. Either form works:" + [Environment]::NewLine +
+                "    someone@mail.com = Name#1234        (explicit, recommended)" + [Environment]::NewLine +
+                "    Name#1234                            (filled into accounts top-down)"
+    $lbl.Location = New-Object System.Drawing.Point(16, 12)
+    $lbl.Size = New-Object System.Drawing.Size(670, 58)
+    $lbl.Font = New-Object System.Drawing.Font('Consolas', 9)
+    $lbl.ForeColor = $c.Subtle
+    $dlg.Controls.Add($lbl)
+
+    $txt = New-Object System.Windows.Forms.TextBox
+    $txt.Multiline = $true; $txt.ScrollBars = 'Vertical'; $txt.AcceptsReturn = $true
+    $txt.Location = New-Object System.Drawing.Point(16, 74)
+    $txt.Size = New-Object System.Drawing.Size(672, 130)
+    $txt.Anchor = 'Top,Left,Right'
+    $txt.BackColor = $c.GridBack; $txt.ForeColor = $c.Fore; $txt.BorderStyle = 'FixedSingle'
+    $txt.Font = New-Object System.Drawing.Font('Consolas', 10)
+    $dlg.Controls.Add($txt)
+
+    $preview = New-Object System.Windows.Forms.DataGridView
+    $preview.Location = New-Object System.Drawing.Point(16, 250)
+    $preview.Size = New-Object System.Drawing.Size(672, 230)
+    $preview.Anchor = 'Top,Bottom,Left,Right'
+    $preview.AllowUserToAddRows = $false; $preview.AllowUserToDeleteRows = $false
+    $preview.ReadOnly = $true; $preview.RowHeadersVisible = $false
+    $preview.SelectionMode = 'FullRowSelect'; $preview.AutoSizeColumnsMode = 'Fill'
+    $preview.EnableHeadersVisualStyles = $false; $preview.BorderStyle = 'FixedSingle'
+    $preview.BackgroundColor = $c.GridBack; $preview.GridColor = $c.Border
+    $preview.DefaultCellStyle.BackColor = $c.GridBack
+    $preview.DefaultCellStyle.ForeColor = $c.Fore
+    $preview.DefaultCellStyle.SelectionBackColor = $c.SelectionBack
+    $preview.DefaultCellStyle.SelectionForeColor = $c.SelectionFore
+    $preview.ColumnHeadersDefaultCellStyle.BackColor = $c.HeaderBack
+    $preview.ColumnHeadersDefaultCellStyle.ForeColor = $c.Fore
+    [void]$preview.Columns.Add('Account','Account')
+    [void]$preview.Columns.Add('Current','Current tag')
+    [void]$preview.Columns.Add('New','New tag')
+    [void]$preview.Columns.Add('How','Matched')
+    [void]$preview.Columns.Add('Valid','Validation')
+    $dlg.Controls.Add($preview)
+
+    $status = New-Object System.Windows.Forms.Label
+    $status.Location = New-Object System.Drawing.Point(16, 486)
+    $status.Size = New-Object System.Drawing.Size(672, 20)
+    $status.Anchor = 'Bottom,Left,Right'
+    $status.ForeColor = $c.Subtle
+    $status.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+    $dlg.Controls.Add($status)
+
+    $script:ImportEntries = @()
+    function Refresh-Preview {
+        $script:ImportEntries = @(Parse-TagImport $txt.Text)
+        $preview.Rows.Clear()
+        foreach ($en in $script:ImportEntries) {
+            $cur = [string](Get-AccountMeta $en.Account).BattleTag
+            $known = ($script:Accounts -contains $en.Account)
+            $how = $en.Source
+            if (-not $known) { $how = 'NO SUCH ACCOUNT' }
+            $idx = $preview.Rows.Add($en.Account, $cur, $en.Tag, $how, '')
+            if (-not $known) { $preview.Rows[$idx].DefaultCellStyle.ForeColor = $script:Colors.Danger }
+        }
+        $status.Text = "$($script:ImportEntries.Count) entr(y/ies) parsed. Nothing is saved until you press Apply."
+    }
+    $txt.Add_TextChanged({ Refresh-Preview })
+
+    $bY = 212
+    $btnLoad = New-Object System.Windows.Forms.Button
+    $btnLoad.Text = 'Load from file...'
+    $btnLoad.Location = New-Object System.Drawing.Point(16, $bY)
+    $btnLoad.Size = New-Object System.Drawing.Size(150, 30)
+    Style-Button $btnLoad 'normal'
+    $btnLoad.Add_Click({
+        $ofd = New-Object System.Windows.Forms.OpenFileDialog
+        $ofd.Filter = 'Text or CSV (*.txt;*.csv)|*.txt;*.csv|JSON (*.json)|*.json|All files (*.*)|*.*'
+        if ($ofd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+            try {
+                $raw = Get-Content $ofd.FileName -Raw
+                if ($ofd.FileName -match '\.json$') {
+                    $obj = $raw | ConvertFrom-Json
+                    $lines = foreach ($p in $obj.PSObject.Properties) {
+                        $v = $p.Value
+                        $tag = if ($v -is [string]) { $v } else { [string]$v.BattleTag }
+                        if ($tag) { "$($p.Name) = $tag" }
+                    }
+                    $txt.Text = ($lines -join [Environment]::NewLine)
+                } else {
+                    $txt.Text = $raw
+                }
+            } catch {
+                [System.Windows.Forms.MessageBox]::Show("Could not read that file: $_", 'Import', 'OK', 'Error') | Out-Null
+            }
+        }
+    })
+    $dlg.Controls.Add($btnLoad)
+
+    $btnVal = New-Object System.Windows.Forms.Button
+    $btnVal.Text = 'Validate tags'
+    $btnVal.Location = New-Object System.Drawing.Point(174, $bY)
+    $btnVal.Size = New-Object System.Drawing.Size(140, 30)
+    Style-Button $btnVal 'normal'
+    $btnVal.Add_Click({
+        if ($preview.Rows.Count -eq 0) { return }
+        $dlg.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+        $n = 0
+        foreach ($row in $preview.Rows) {
+            $n++
+            $status.Text = "Checking $n of $($preview.Rows.Count)..."
+            [System.Windows.Forms.Application]::DoEvents()
+            $tag = [string]$row.Cells['New'].Value
+            $res = Test-BattleTagExists $tag
+            $row.Cells['Valid'].Value = $res
+            if ($res -eq 'OK') { $row.Cells['Valid'].Style.ForeColor = $script:Colors.Accent }
+            else { $row.Cells['Valid'].Style.ForeColor = $script:Colors.Danger }
+            [System.Windows.Forms.Application]::DoEvents()
+        }
+        $bad = @($preview.Rows | Where-Object { [string]$_.Cells['Valid'].Value -ne 'OK' }).Count
+        $dlg.Cursor = [System.Windows.Forms.Cursors]::Default
+        if ($bad -gt 0) { $status.Text = "$bad tag(s) did not resolve - usually the digits after # are wrong." }
+        else { $status.Text = 'All tags resolved.' }
+    })
+    $dlg.Controls.Add($btnVal)
+
+    $btnExport = New-Object System.Windows.Forms.Button
+    $btnExport.Text = 'Export current tags...'
+    $btnExport.Location = New-Object System.Drawing.Point(322, $bY)
+    $btnExport.Size = New-Object System.Drawing.Size(180, 30)
+    Style-Button $btnExport 'normal'
+    $btnExport.Add_Click({
+        $sfd = New-Object System.Windows.Forms.SaveFileDialog
+        $sfd.Filter = 'Text (*.txt)|*.txt|JSON (*.json)|*.json'
+        $sfd.FileName = 'battletags.txt'
+        if ($sfd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+            try {
+                if ($sfd.FileName -match '\.json$') {
+                    $out = @{}
+                    foreach ($a in $script:Accounts) {
+                        $t = [string](Get-AccountMeta $a).BattleTag
+                        if ($t) { $out[$a] = $t }
+                    }
+                    ($out | ConvertTo-Json) | Set-Content $sfd.FileName -Encoding UTF8
+                } else {
+                    $lines = foreach ($a in $script:Accounts) {
+                        $t = [string](Get-AccountMeta $a).BattleTag
+                        if ($t) { "$a = $t" }
+                    }
+                    $lines | Set-Content $sfd.FileName -Encoding UTF8
+                }
+                $status.Text = "Exported to $($sfd.FileName)"
+            } catch {
+                [System.Windows.Forms.MessageBox]::Show("Export failed: $_", 'Export', 'OK', 'Error') | Out-Null
+            }
+        }
+    })
+    $dlg.Controls.Add($btnExport)
+
+    $btnFill = New-Object System.Windows.Forms.Button
+    $btnFill.Text = 'Prefill from accounts'
+    $btnFill.Location = New-Object System.Drawing.Point(510, $bY)
+    $btnFill.Size = New-Object System.Drawing.Size(178, 30)
+    Style-Button $btnFill 'normal'
+    $btnFill.Add_Click({
+        $lines = foreach ($a in $script:Accounts) { "$a = $([string](Get-AccountMeta $a).BattleTag)" }
+        $txt.Text = ($lines -join [Environment]::NewLine)
+    })
+    $dlg.Controls.Add($btnFill)
+
+    $btnApply = New-Object System.Windows.Forms.Button
+    $btnApply.Text = 'Apply'
+    $btnApply.Location = New-Object System.Drawing.Point(16, 512)
+    $btnApply.Size = New-Object System.Drawing.Size(330, 36)
+    $btnApply.Anchor = 'Bottom,Left'
+    Style-Button $btnApply 'primary'
+    $btnApply.DialogResult = 'OK'
+    $dlg.Controls.Add($btnApply)
+
+    $btnClose = New-Object System.Windows.Forms.Button
+    $btnClose.Text = 'Cancel'
+    $btnClose.Location = New-Object System.Drawing.Point(356, 512)
+    $btnClose.Size = New-Object System.Drawing.Size(332, 36)
+    $btnClose.Anchor = 'Bottom,Left'
+    Style-Button $btnClose 'normal'
+    $btnClose.DialogResult = 'Cancel'
+    $dlg.Controls.Add($btnClose)
+
+    $dlg.AcceptButton = $btnApply; $dlg.CancelButton = $btnClose
+    $btnFill.PerformClick()
+
+    $res = $dlg.ShowDialog($script:Form)
+    if ($res -eq [System.Windows.Forms.DialogResult]::OK) {
+        $applied = 0; $skipped = 0
+        foreach ($en in $script:ImportEntries) {
+            if ($script:Accounts -notcontains $en.Account) { $skipped++; continue }
+            $meta = Get-AccountMeta $en.Account
+            $meta.BattleTag = [string]$en.Tag
+            $script:AccountStore[$en.Account] = $meta
+            $applied++
+        }
+        Save-AccountStore
+        Reload-AccountRows
+        Start-AllRankFetches
+        $msg = "Imported $applied BattleTag(s)"
+        if ($skipped -gt 0) { $msg += "; skipped $skipped line(s) with unknown accounts" }
+        Set-Status $msg
+    }
+    $dlg.Dispose()
+}
+
+#--------------------------------------
 # SWITCH LOGIC
 #--------------------------------------
 function Confirm-FlaggedSwitch {
@@ -1634,7 +1912,7 @@ function Show-SettingsDialog {
     $dlg.FormBorderStyle = 'FixedDialog'
     $dlg.MaximizeBox = $false; $dlg.MinimizeBox = $false
     $dlg.StartPosition = 'CenterParent'
-    $dlg.Size = New-Object System.Drawing.Size(440, 690)
+    $dlg.Size = New-Object System.Drawing.Size(440, 736)
     $dlg.BackColor = $c.FormBack
     $dlg.ForeColor = $c.Fore
     $dlg.Font = New-Object System.Drawing.Font('Segoe UI', 10)
@@ -1709,6 +1987,15 @@ function Show-SettingsDialog {
         $y += 30
     }
     $y += 8
+
+    $btnImport = New-Object System.Windows.Forms.Button
+    $btnImport.Text = 'Import / export BattleTags'
+    $btnImport.Location = New-Object System.Drawing.Point($x, $y)
+    $btnImport.Size = New-Object System.Drawing.Size(380, 32)
+    Style-Button $btnImport 'normal'
+    $btnImport.Add_Click({ $dlg.Close(); Show-ImportDialog })
+    $dlg.Controls.Add($btnImport)
+    $y += 40
 
     $btnCache = New-Object System.Windows.Forms.Button
     $btnCache.Text = 'Clear icon cache'
@@ -1799,6 +2086,9 @@ $miStatus.Add_Click({ $a = Get-SelectedAccount; if ($a) { Show-StatusDialog $a }
 
 $miProfile = $script:Menu.Items.Add('Overwatch settings profile...')
 $miProfile.Add_Click({ Show-ProfilesDialog })
+
+$miImport = $script:Menu.Items.Add('Import / export BattleTags...')
+$miImport.Add_Click({ Show-ImportDialog })
 
 [void]$script:Menu.Items.Add('-')
 
@@ -2090,10 +2380,17 @@ if ($env:BNS_SMOKETEST) {
                 $applied = Apply-SettingsProfile -Name $env:BNS_SMOKE_PROFILE -Silent $true
                 $profileResult = "saved=$saved applied=$applied list=$((Get-SettingsProfiles) -join ',')"
             }
+            $importTest = $null
+            if ($env:BNS_SMOKE_IMPORT) {
+                $importTest = @(Parse-TagImport ($env:BNS_SMOKE_IMPORT -replace '\|', "`n") | ForEach-Object {
+                    [ordered]@{ Account = $_.Account; Tag = $_.Tag; Source = $_.Source }
+                })
+            }
             $dump = [ordered]@{
                 Accounts = @($script:Accounts)
                 OWSettingsPath = [string](Get-OWSettingsPath)
                 ProfileTest = $profileResult
+                ImportTest = $importTest
                 Rows = @(foreach ($row in $script:Grid.Rows) {
                     $cos = $row.Cells['Account'].Tag
                     [ordered]@{

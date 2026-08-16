@@ -37,6 +37,23 @@ The original tool worked, but the rank column never populated. Three separate bu
 > You enter each account's BattleTag once (`Name#1234`). Battle.net only stores emails, and a BattleTag
 > cannot be derived from an email locally — so a one-time entry per account is unavoidable.
 
+### BattleTag import / export
+Right-click any row → **Import / export BattleTags** (also in Settings).
+
+- Paste every tag at once instead of editing cells one at a time. Two accepted forms:
+  `someone@mail.com = Name#1234` (explicit) or a bare `Name#1234` per line, filled into accounts top-down.
+- Load from a `.txt`, `.csv` or `.json` file, or export your current tags to one — handy as a backup or
+  when moving to another PC.
+- **Validate tags** checks each one against the API before you commit, so a mistyped discriminator is
+  caught immediately rather than showing up later as a missing rank.
+- A preview table shows exactly what will change, and lines naming unknown accounts are flagged and skipped.
+  Nothing is written until you press Apply.
+
+> **Why there is no auto-detect:** BattleTags are not stored anywhere on your PC. Battle.net keeps login
+> emails locally and fetches everything else from Blizzard's servers at runtime — the game logs, the
+> per-account config files and the client's own caches contain no BattleTag. There is nothing on disk to
+> read, so bulk entry with validation is as automatic as this can honestly get.
+
 ### Account management
 - **Remove accounts** — purges the entry from `Battle.net.config` and deletes its saved BattleTag/status here.
   Writes a `.backup` first, plus a `removed-accounts.json` recovery log. Refuses to remove your last account,
