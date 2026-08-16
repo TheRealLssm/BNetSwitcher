@@ -6,6 +6,7 @@ A fast, dark-themed GUI for switching between Battle.net accounts on Windows, wi
 > All credit for the original tool and the core switching approach goes to them. This fork rewrites the GUI,
 > fixes the rank lookup, and adds account management. The original is licensed "use as you wish".
 
+https://discord.gg/ySbvQZn4X3 My Discord server for any issues or Future tools
 ---
 
 ## Why this fork exists
