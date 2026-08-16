@@ -14,7 +14,8 @@
 param(
     [string]$SourceScript = "bnet-switcher-gui.ps1",
     [string]$OutputExe = "bnet-switcher.exe",
-    [string]$IconPath = "bnet-switcher.ico"
+    [string]$IconPath = "bnet-switcher.ico",
+    [string]$Version = "1.2.0.0"
 )
 
 $ScriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -64,11 +65,20 @@ if (-not $ps2exeAvailable) {
 }
 
 # Build command with parameters
+# File metadata. Without this the exe reports version 0.0.0.0 and blank
+# publisher fields, which tells users nothing when they inspect Properties
+# and does the file no favours with antivirus heuristics either.
 $buildParams = @{
     inputFile   = $SourceFull
     outputFile  = $OutputFull
     x64         = $true
     noConsole   = $true
+    title       = 'Battle.net Account Switcher - Dark Edition'
+    description = 'Switch Battle.net accounts and view Overwatch 2 ranks'
+    product     = 'BNetSwitcher Dark Edition'
+    company     = 'Open source - github.com/TheRealLssm/BNetSwitcher'
+    copyright   = 'Fork of BNetSwitcher by Nepero27182. Use as you wish.'
+    version     = $Version
 }
 
 if (-not [string]::IsNullOrEmpty($IconPath)) {
