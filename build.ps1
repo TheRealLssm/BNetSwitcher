@@ -75,6 +75,22 @@ if (-not [string]::IsNullOrEmpty($IconPath)) {
     $buildParams['iconFile'] = $IconPath
 }
 
+# A running instance holds a lock on the exe, and ps2exe cannot replace it.
+# Without this check the build below fails but still leaves the OLD exe in
+# place, which used to be reported as success.
+$exeName = [System.IO.Path]::GetFileNameWithoutExtension($OutputExe)
+$running = @(Get-Process -Name $exeName -ErrorAction SilentlyContinue)
+if ($running.Count -gt 0) {
+    Write-Host ""
+    Write-Host "$OutputExe is currently running (PID $($running.Id -join ', '))." -ForegroundColor Yellow
+    Write-Host "Close it before building, or the old executable stays in place." -ForegroundColor Yellow
+    exit 1
+}
+
+# Remember the current build so we can prove a new one replaced it
+$previousWrite = $null
+if (Test-Path $OutputFull) { $previousWrite = (Get-Item $OutputFull).LastWriteTime }
+
 Write-Host "Building EXE..." -ForegroundColor Cyan
 Write-Host "  Source: $SourceFull"
 Write-Host "  Output: $OutputFull"
@@ -89,15 +105,22 @@ $buildOutput = ps2exe @buildParams 2>&1
 if ($buildOutput) {
     Write-Host $buildOutput
 }
-# Verify output
-if (Test-Path $OutputFull) {
-    Write-Host ""
-    Write-Host "Build complete!" -ForegroundColor Green
-    Write-Host "Output: $OutputFull" -ForegroundColor Green
-    
-    $fileSize = (Get-Item $OutputFull).Length / 1MB
-    Write-Host "Size: $([math]::Round($fileSize, 2)) MB" -ForegroundColor Green
-} else {
-    Write-Error "Build failed: Output file not created"
+# Verify output. Existence alone is not proof: a failed build leaves the
+# previous executable untouched, so require that it was actually rewritten.
+if (-not (Test-Path $OutputFull)) {
+    Write-Error "Build failed: output file was not created."
     exit 1
 }
+
+$newWrite = (Get-Item $OutputFull).LastWriteTime
+if ($previousWrite -and $newWrite -le $previousWrite) {
+    Write-Error "Build failed: $OutputExe was not replaced - it is still the previous build (last written $newWrite). Check the ps2exe output above."
+    exit 1
+}
+
+Write-Host ""
+Write-Host "Build complete!" -ForegroundColor Green
+Write-Host "Output: $OutputFull" -ForegroundColor Green
+Write-Host "Built:  $newWrite" -ForegroundColor Green
+$fileSize = (Get-Item $OutputFull).Length / 1MB
+Write-Host "Size: $([math]::Round($fileSize, 2)) MB" -ForegroundColor Green
