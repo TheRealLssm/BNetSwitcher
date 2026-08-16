@@ -74,12 +74,15 @@ $script:SettingsPath       = Join-Path $script:DataFolder 'settings.json'
 $script:AccountStorePath   = Join-Path $script:DataFolder 'accounts.json'
 $script:LegacyTagPath      = Join-Path $script:DataFolder 'battletags.json'
 $script:IconCacheDir       = Join-Path $script:DataFolder 'rankicons'
+$script:PlayerIconDir      = Join-Path $script:DataFolder 'playericons'
+$script:ProfileDir         = Join-Path $script:DataFolder 'profiles'
 $script:DebugLogPath       = Join-Path $script:DataFolder 'debug.log'
 $script:RemovedLogPath     = Join-Path $script:DataFolder 'removed-accounts.json'
 
 try {
-    if (-not (Test-Path $script:DataFolder))   { New-Item -ItemType Directory -Path $script:DataFolder -Force | Out-Null }
-    if (-not (Test-Path $script:IconCacheDir)) { New-Item -ItemType Directory -Path $script:IconCacheDir -Force | Out-Null }
+    foreach ($d in @($script:DataFolder, $script:IconCacheDir, $script:PlayerIconDir, $script:ProfileDir)) {
+        if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
+    }
 } catch { }
 
 # Non-ASCII glyphs built from char codes so file encoding can never garble them
@@ -94,6 +97,8 @@ $script:DefaultSettings = @{
     Theme                  = 'Dark'    # Dark | Light | Auto
     Platform               = 'pc'      # pc | console
     ShowRankIcons          = $true
+    ShowPlayerIcons        = $true
+    ApplyProfileOnSwitch   = $true
     FetchRanksOnStart      = $true
     AutoLaunchBattleNet    = $true
     LaunchOverwatch        = $false
@@ -146,7 +151,7 @@ function Write-DebugLog {
 $script:StatusValues = @('OK', 'Watch', 'Suspended', 'Banned')
 
 function New-AccountMeta {
-    return @{ BattleTag = ''; Status = 'OK'; Note = ''; Until = '' }
+    return @{ BattleTag = ''; Status = 'OK'; Note = ''; Until = ''; Profile = '' }
 }
 
 function Load-AccountStore {
@@ -164,8 +169,9 @@ function Load-AccountStore {
                     } else {
                         if ($v.BattleTag) { $meta.BattleTag = [string]$v.BattleTag }
                         if ($v.Status -and ($script:StatusValues -contains [string]$v.Status)) { $meta.Status = [string]$v.Status }
-                        if ($v.Note)  { $meta.Note  = [string]$v.Note }
-                        if ($v.Until) { $meta.Until = [string]$v.Until }
+                        if ($v.Note)    { $meta.Note    = [string]$v.Note }
+                        if ($v.Until)   { $meta.Until   = [string]$v.Until }
+                        if ($v.Profile) { $meta.Profile = [string]$v.Profile }
                     }
                     $store[$prop.Name] = $meta
                 }
@@ -207,6 +213,7 @@ function Save-AccountStore {
                 Status    = [string]$m.Status
                 Note      = [string]$m.Note
                 Until     = [string]$m.Until
+                Profile   = [string]$m.Profile
             }
         }
         ($out | ConvertTo-Json -Depth 5) | Set-Content -Path $script:AccountStorePath -Encoding UTF8
@@ -286,28 +293,33 @@ function Get-ThemeColors {
             HeaderBack    = [System.Drawing.Color]::FromArgb(232, 234, 238)
             Border        = [System.Drawing.Color]::FromArgb(201, 206, 214)
             ButtonBack    = [System.Drawing.Color]::FromArgb(228, 231, 236)
-            Accent        = [System.Drawing.Color]::FromArgb(0, 116, 224)
+            Accent        = [System.Drawing.Color]::FromArgb(224, 132, 16)
             AccentFore    = [System.Drawing.Color]::White
+            Blue          = [System.Drawing.Color]::FromArgb(0, 116, 224)
+            Gold          = [System.Drawing.Color]::FromArgb(176, 132, 24)
             Danger        = [System.Drawing.Color]::FromArgb(200, 40, 40)
             SelectionBack = [System.Drawing.Color]::FromArgb(204, 224, 245)
             SelectionFore = [System.Drawing.Color]::FromArgb(27, 31, 38)
         }
     }
+    # Overwatch-inspired: deep slate blues with the signature orange accent
     return @{
         IsDark        = $true
-        FormBack      = [System.Drawing.Color]::FromArgb(20, 23, 28)
-        Fore          = [System.Drawing.Color]::FromArgb(228, 231, 236)
-        Subtle        = [System.Drawing.Color]::FromArgb(152, 161, 176)
-        GridBack      = [System.Drawing.Color]::FromArgb(27, 31, 38)
-        GridAlt       = [System.Drawing.Color]::FromArgb(32, 37, 46)
-        HeaderBack    = [System.Drawing.Color]::FromArgb(38, 44, 54)
-        Border        = [System.Drawing.Color]::FromArgb(51, 58, 70)
-        ButtonBack    = [System.Drawing.Color]::FromArgb(42, 49, 61)
-        Accent        = [System.Drawing.Color]::FromArgb(20, 142, 255)
-        AccentFore    = [System.Drawing.Color]::White
-        Danger        = [System.Drawing.Color]::FromArgb(214, 62, 62)
-        SelectionBack = [System.Drawing.Color]::FromArgb(42, 74, 115)
-        SelectionFore = [System.Drawing.Color]::White
+        FormBack      = [System.Drawing.Color]::FromArgb(13, 18, 25)
+        Fore          = [System.Drawing.Color]::FromArgb(238, 236, 230)
+        Subtle        = [System.Drawing.Color]::FromArgb(145, 158, 175)
+        GridBack      = [System.Drawing.Color]::FromArgb(20, 27, 36)
+        GridAlt       = [System.Drawing.Color]::FromArgb(25, 33, 44)
+        HeaderBack    = [System.Drawing.Color]::FromArgb(31, 41, 54)
+        Border        = [System.Drawing.Color]::FromArgb(45, 58, 74)
+        ButtonBack    = [System.Drawing.Color]::FromArgb(34, 45, 59)
+        Accent        = [System.Drawing.Color]::FromArgb(249, 158, 26)   # OW orange
+        AccentFore    = [System.Drawing.Color]::FromArgb(20, 16, 8)
+        Blue          = [System.Drawing.Color]::FromArgb(67, 160, 255)   # OW blue
+        Gold          = [System.Drawing.Color]::FromArgb(238, 192, 92)
+        Danger        = [System.Drawing.Color]::FromArgb(222, 74, 62)
+        SelectionBack = [System.Drawing.Color]::FromArgb(46, 62, 82)
+        SelectionFore = [System.Drawing.Color]::FromArgb(255, 246, 232)
     }
 }
 
@@ -379,6 +391,122 @@ function Save-BattleNetConfig {
 }
 
 #--------------------------------------
+# OVERWATCH SETTINGS PROFILES
+#
+#   Overwatch 2 keeps only VIDEO/AUDIO/SYSTEM settings in a local file:
+#     Documents\Overwatch\Settings\Settings_v0.ini
+#   Sensitivity, crosshairs and keybinds are NOT in there - Blizzard syncs
+#   those server-side per account, so they already follow each account and
+#   cannot (and should not) be swapped locally.
+#
+#   A profile is a snapshot of that ini. Bind one to an account and it is
+#   applied automatically on switch, while Overwatch is closed.
+#--------------------------------------
+function Get-OWSettingsPath {
+    if ($env:BNS_OWSETTINGS_OVERRIDE) { return $env:BNS_OWSETTINGS_OVERRIDE }
+    $candidates = @()
+    try { $candidates += (Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Overwatch\Settings\Settings_v0.ini') } catch { }
+    $candidates += (Join-Path $env:USERPROFILE 'Documents\Overwatch\Settings\Settings_v0.ini')
+    $candidates += (Join-Path $env:USERPROFILE 'OneDrive\Documents\Overwatch\Settings\Settings_v0.ini')
+    foreach ($c in $candidates) { if ($c -and (Test-Path $c)) { return $c } }
+    return $null
+}
+
+function Test-OverwatchRunning {
+    if ($env:BNS_SMOKETEST) { return $false }
+    return [bool](Get-Process 'Overwatch' -ErrorAction SilentlyContinue)
+}
+
+function Get-SettingsProfiles {
+    if (-not (Test-Path $script:ProfileDir)) { return @() }
+    try {
+        return @(Get-ChildItem $script:ProfileDir -Filter '*.ini' -File | ForEach-Object { $_.BaseName } | Sort-Object)
+    } catch { return @() }
+}
+
+function Get-ProfilePath {
+    param([string]$Name)
+    $safe = ($Name -replace '[\\/:*?"<>|]', '_').Trim()
+    if ([string]::IsNullOrWhiteSpace($safe)) { return $null }
+    return (Join-Path $script:ProfileDir "$safe.ini")
+}
+
+function Save-SettingsProfile {
+    param([string]$Name)
+    $src = Get-OWSettingsPath
+    if (-not $src) {
+        [System.Windows.Forms.MessageBox]::Show(
+            "Could not find Overwatch's settings file.`n`nExpected at:`nDocuments\Overwatch\Settings\Settings_v0.ini`n`nLaunch Overwatch once so it creates the file.",
+            'Overwatch settings not found', 'OK', 'Warning') | Out-Null
+        return $false
+    }
+    $dst = Get-ProfilePath $Name
+    if (-not $dst) { return $false }
+    try {
+        Copy-Item $src $dst -Force
+        Write-DebugLog "Saved settings profile '$Name' from $src"
+        return $true
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show("Could not save profile: $_", 'Error', 'OK', 'Error') | Out-Null
+        return $false
+    }
+}
+
+function Apply-SettingsProfile {
+    param([string]$Name, [bool]$Silent = $false)
+    $prof = Get-ProfilePath $Name
+    if (-not $prof -or -not (Test-Path $prof)) {
+        if (-not $Silent) {
+            [System.Windows.Forms.MessageBox]::Show("Profile '$Name' no longer exists.", 'Profile missing', 'OK', 'Warning') | Out-Null
+        }
+        return $false
+    }
+    $dst = Get-OWSettingsPath
+    if (-not $dst) {
+        if (-not $Silent) {
+            [System.Windows.Forms.MessageBox]::Show(
+                "Overwatch's settings file was not found, so the profile cannot be applied.",
+                'Overwatch settings not found', 'OK', 'Warning') | Out-Null
+        }
+        return $false
+    }
+    # Overwatch rewrites this file when it exits and would overwrite us
+    if (Test-OverwatchRunning) {
+        if (-not $Silent) {
+            [System.Windows.Forms.MessageBox]::Show(
+                "Overwatch is running. It rewrites its settings file on exit, which would discard this profile.`n`nClose Overwatch first, then apply.",
+                'Overwatch is running', 'OK', 'Warning') | Out-Null
+        }
+        Write-DebugLog "Skipped applying profile '$Name' - Overwatch running"
+        return $false
+    }
+    try {
+        Copy-Item $dst "$dst.bnsbackup" -Force -ErrorAction SilentlyContinue
+        Copy-Item $prof $dst -Force
+        Write-DebugLog "Applied settings profile '$Name' to $dst"
+        return $true
+    } catch {
+        if (-not $Silent) {
+            [System.Windows.Forms.MessageBox]::Show("Could not apply profile: $_", 'Error', 'OK', 'Error') | Out-Null
+        }
+        return $false
+    }
+}
+
+function Remove-SettingsProfile {
+    param([string]$Name)
+    $prof = Get-ProfilePath $Name
+    if ($prof -and (Test-Path $prof)) {
+        try { Remove-Item $prof -Force } catch { }
+    }
+    # Unbind it from any account that referenced it
+    foreach ($k in @($script:AccountStore.Keys)) {
+        if ([string]$script:AccountStore[$k].Profile -eq $Name) { $script:AccountStore[$k].Profile = '' }
+    }
+    Save-AccountStore
+}
+
+#--------------------------------------
 # IMAGE CACHE (rank icons, loaded without file locks)
 #--------------------------------------
 $script:ImageCache = @{}
@@ -403,12 +531,30 @@ function Get-CachedImage {
 $script:RoleColumns = @('Tank', 'DPS', 'Support', 'OpenQueue')
 
 $script:FetchScript = @'
-param($BattleTag, $Platform, $CacheDir)
+param($BattleTag, $Platform, $CacheDir, $PlayerIconDir)
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072
 $ErrorActionPreference = 'Stop'
 
-$result = @{ Ok = $false; Error = ''; Season = $null; Username = ''; Updated = $null; Roles = @{} }
+$result = @{
+    Ok = $false; Error = ''; Season = $null; Username = ''; Updated = $null; Roles = @{}
+    Title = ''; Endorsement = 0; Avatar = ''; Namecard = ''
+}
 $dash = [string][char]0x2013
+
+# Download an image once and return its local cached path
+function Get-RemoteImage {
+    param($Url, $Dir, $Prefix)
+    if (-not $Url) { return '' }
+    try {
+        $fname = [System.IO.Path]::GetFileName(([Uri]$Url).AbsolutePath)
+        $fname = "$Prefix-" + ($fname -replace '[^A-Za-z0-9_.-]', '_')
+        $path = Join-Path $Dir $fname
+        if (-not (Test-Path $path)) {
+            Invoke-WebRequest -Uri $Url -OutFile $path -UseBasicParsing -TimeoutSec 15
+        }
+        return $path
+    } catch { return '' }
+}
 
 $normalized = ($BattleTag.Trim() -replace '\s', '') -replace '#', '-'
 $normalized = [Uri]::EscapeDataString($normalized)
@@ -420,6 +566,10 @@ try {
     if ($comp -and $comp.season) { $result.Season = $comp.season }
     if ($resp.username) { $result.Username = [string]$resp.username }
     if ($resp.last_updated_at) { $result.Updated = [long]$resp.last_updated_at }
+    if ($resp.title) { $result.Title = [string]$resp.title }
+    if ($resp.endorsement -and $resp.endorsement.level) { $result.Endorsement = [int]$resp.endorsement.level }
+    $result.Avatar   = Get-RemoteImage $resp.avatar   $PlayerIconDir 'av'
+    $result.Namecard = Get-RemoteImage $resp.namecard $PlayerIconDir 'nc'
 
     $map = @(
         @('Tank', 'tank'),
@@ -477,7 +627,7 @@ function Start-RankFetch {
     }
     $ps = [powershell]::Create()
     $ps.RunspacePool = $script:RunspacePool
-    [void]$ps.AddScript($script:FetchScript).AddArgument($BattleTag).AddArgument([string]$script:Settings.Platform).AddArgument($script:IconCacheDir)
+    [void]$ps.AddScript($script:FetchScript).AddArgument($BattleTag).AddArgument([string]$script:Settings.Platform).AddArgument($script:IconCacheDir).AddArgument($script:PlayerIconDir)
     $handle = $ps.BeginInvoke()
     [void]$script:Jobs.Add(@{ PS = $ps; Handle = $handle; Row = $Row; BattleTag = $BattleTag.Trim() })
     Write-DebugLog "Queued rank fetch for $BattleTag"
@@ -528,6 +678,22 @@ function Process-RankJobs {
                 }
             }
             if ($res.Username) { $row.Cells['BattleTag'].ToolTipText = "Profile: $($res.Username)$seasonText" }
+
+            # Player cosmetics for the OW-styled Account cell
+            $cos = @{
+                Username    = [string]$res.Username
+                Title       = [string]$res.Title
+                Endorsement = [int]$res.Endorsement
+                Avatar      = Get-CachedImage ([string]$res.Avatar)
+                Namecard    = Get-CachedImage ([string]$res.Namecard)
+            }
+            $row.Cells['Account'].Tag = $cos
+            $bits = @()
+            if ($cos.Username)      { $bits += $cos.Username }
+            if ($cos.Title)         { $bits += $cos.Title }
+            if ($cos.Endorsement)   { $bits += "Endorsement $($cos.Endorsement)" }
+            if ($bits.Count -gt 0)  { $row.Cells['Account'].ToolTipText = ($bits -join "`n") }
+
             Write-DebugLog "Fetch OK for $($job.BattleTag)"
         }
         $script:Grid.InvalidateRow($row.Index)
@@ -586,7 +752,7 @@ $script:Grid.RowHeadersVisible = $false
 $script:Grid.AutoSizeColumnsMode = 'Fill'
 $script:Grid.ColumnHeadersHeightSizeMode = 'DisableResizing'
 $script:Grid.ColumnHeadersHeight = 34
-$script:Grid.RowTemplate.Height = 36
+$script:Grid.RowTemplate.Height = 50
 $script:Grid.EnableHeadersVisualStyles = $false
 $script:Grid.BorderStyle = 'FixedSingle'
 $script:Grid.CellBorderStyle = 'SingleHorizontal'
@@ -610,13 +776,13 @@ $script:Grid.Columns['Status'].ReadOnly    = $true
 $script:Grid.Columns['BattleTag'].ReadOnly = $false
 foreach ($col in $script:RoleColumns) { $script:Grid.Columns[$col].ReadOnly = $true }
 
-$script:Grid.Columns['Account'].FillWeight   = 24
-$script:Grid.Columns['Status'].FillWeight    = 13
-$script:Grid.Columns['BattleTag'].FillWeight = 19
-$script:Grid.Columns['Tank'].FillWeight      = 11
-$script:Grid.Columns['DPS'].FillWeight       = 11
-$script:Grid.Columns['Support'].FillWeight   = 11
-$script:Grid.Columns['OpenQueue'].FillWeight = 13
+$script:Grid.Columns['Account'].FillWeight   = 31
+$script:Grid.Columns['Status'].FillWeight    = 12
+$script:Grid.Columns['BattleTag'].FillWeight = 16
+$script:Grid.Columns['Tank'].FillWeight      = 10
+$script:Grid.Columns['DPS'].FillWeight       = 10
+$script:Grid.Columns['Support'].FillWeight   = 10
+$script:Grid.Columns['OpenQueue'].FillWeight = 11
 
 foreach ($c in $script:Grid.Columns) { $c.SortMode = 'NotSortable' }
 
@@ -624,40 +790,47 @@ $script:Form.Controls.Add($script:Grid)
 
 $script:SwitchBtn = New-Object System.Windows.Forms.Button
 $script:SwitchBtn.Text = 'Switch Account'
-$script:SwitchBtn.Size = New-Object System.Drawing.Size(200, $btnRowH)
+$script:SwitchBtn.Size = New-Object System.Drawing.Size(180, $btnRowH)
 $script:SwitchBtn.Anchor = 'Bottom,Left'
 
 $script:RefreshBtn = New-Object System.Windows.Forms.Button
-$script:RefreshBtn.Text = 'Refresh Ranks  (F5)'
-$script:RefreshBtn.Size = New-Object System.Drawing.Size(155, $btnRowH)
+$script:RefreshBtn.Text = 'Refresh  (F5)'
+$script:RefreshBtn.Size = New-Object System.Drawing.Size(130, $btnRowH)
 $script:RefreshBtn.Anchor = 'Bottom,Left'
 
 $script:StatusBtn = New-Object System.Windows.Forms.Button
 $script:StatusBtn.Text = 'Set Status'
-$script:StatusBtn.Size = New-Object System.Drawing.Size(115, $btnRowH)
+$script:StatusBtn.Size = New-Object System.Drawing.Size(110, $btnRowH)
 $script:StatusBtn.Anchor = 'Bottom,Left'
+
+$script:ProfileBtn = New-Object System.Windows.Forms.Button
+$script:ProfileBtn.Text = 'Game Profiles'
+$script:ProfileBtn.Size = New-Object System.Drawing.Size(130, $btnRowH)
+$script:ProfileBtn.Anchor = 'Bottom,Left'
 
 $script:RemoveBtn = New-Object System.Windows.Forms.Button
 $script:RemoveBtn.Text = 'Remove'
-$script:RemoveBtn.Size = New-Object System.Drawing.Size(115, $btnRowH)
+$script:RemoveBtn.Size = New-Object System.Drawing.Size(105, $btnRowH)
 $script:RemoveBtn.Anchor = 'Bottom,Left'
 
 $script:SettingsBtn = New-Object System.Windows.Forms.Button
 $script:SettingsBtn.Text = 'Settings'
-$script:SettingsBtn.Size = New-Object System.Drawing.Size(110, $btnRowH)
+$script:SettingsBtn.Size = New-Object System.Drawing.Size(105, $btnRowH)
 $script:SettingsBtn.Anchor = 'Bottom,Left'
 
 $btnY = $script:Form.ClientSize.Height - $btnRowH - $statusH - 8
 $bx = $pad
-$script:SwitchBtn.Location   = New-Object System.Drawing.Point($bx, $btnY); $bx += 210
-$script:RefreshBtn.Location  = New-Object System.Drawing.Point($bx, $btnY); $bx += 165
-$script:StatusBtn.Location   = New-Object System.Drawing.Point($bx, $btnY); $bx += 125
-$script:RemoveBtn.Location   = New-Object System.Drawing.Point($bx, $btnY); $bx += 125
+$script:SwitchBtn.Location   = New-Object System.Drawing.Point($bx, $btnY); $bx += 190
+$script:RefreshBtn.Location  = New-Object System.Drawing.Point($bx, $btnY); $bx += 140
+$script:StatusBtn.Location   = New-Object System.Drawing.Point($bx, $btnY); $bx += 120
+$script:ProfileBtn.Location  = New-Object System.Drawing.Point($bx, $btnY); $bx += 140
+$script:RemoveBtn.Location   = New-Object System.Drawing.Point($bx, $btnY); $bx += 115
 $script:SettingsBtn.Location = New-Object System.Drawing.Point($bx, $btnY)
 
 $script:Form.Controls.Add($script:SwitchBtn)
 $script:Form.Controls.Add($script:RefreshBtn)
 $script:Form.Controls.Add($script:StatusBtn)
+$script:Form.Controls.Add($script:ProfileBtn)
 $script:Form.Controls.Add($script:RemoveBtn)
 $script:Form.Controls.Add($script:SettingsBtn)
 
@@ -727,6 +900,7 @@ function Apply-Theme {
     Style-Button $script:SwitchBtn   'primary'
     Style-Button $script:RefreshBtn  'normal'
     Style-Button $script:StatusBtn   'normal'
+    Style-Button $script:ProfileBtn  'normal'
     Style-Button $script:RemoveBtn   'danger'
     Style-Button $script:SettingsBtn 'normal'
 
@@ -814,20 +988,19 @@ function Reload-AccountRows {
         $meta = Get-AccountMeta $acct
         $display = $acct
         if ($script:Settings.StreamerMode) { $display = Mask-Account $acct }
-        if ($i -eq 0) { $display = "$($script:GlyphDot) $display" }
 
         $statusText = Get-StatusDisplay $meta
         $rowIndex = $script:Grid.Rows.Add($display, $statusText, [string]$meta.BattleTag, '', '', '', '')
         $row = $script:Grid.Rows[$rowIndex]
         $row.Tag = $acct
 
-        $row.Cells['Account'].ToolTipText = 'Double-click to switch. Right-click for options.'
-        if ($i -eq 0) {
-            $row.Cells['Account'].Style.ForeColor = $script:Colors.Accent
-            $row.Cells['Account'].Style.SelectionForeColor = $script:Colors.Accent
-            $row.Cells['Account'].Style.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 10)
-            $row.Cells['Account'].ToolTipText = 'Currently active account'
+        $tipLines = @()
+        if ($i -eq 0) { $tipLines += 'Currently active account' }
+        else { $tipLines += 'Double-click to switch. Right-click for options.' }
+        if (-not [string]::IsNullOrWhiteSpace([string]$meta.Profile)) {
+            $tipLines += "Settings profile: $($meta.Profile)"
         }
+        $row.Cells['Account'].ToolTipText = ($tipLines -join "`n")
 
         $statusColor = Get-StatusColor ([string]$meta.Status)
         $row.Cells['Status'].Style.ForeColor = $statusColor
@@ -1071,6 +1244,227 @@ function Show-StatusDialog {
 }
 
 #--------------------------------------
+# SETTINGS PROFILES DIALOG
+#--------------------------------------
+function Show-InputDialog {
+    param([string]$Title, [string]$Prompt, [string]$Default = '')
+    $c = $script:Colors
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text = $Title
+    $dlg.FormBorderStyle = 'FixedDialog'
+    $dlg.MaximizeBox = $false; $dlg.MinimizeBox = $false
+    $dlg.StartPosition = 'CenterParent'
+    $dlg.Size = New-Object System.Drawing.Size(420, 190)
+    $dlg.BackColor = $c.FormBack
+    $dlg.ForeColor = $c.Fore
+    $dlg.Font = New-Object System.Drawing.Font('Segoe UI', 10)
+    $dlg.Add_Shown({ Set-DarkTitleBar -TargetForm $this -Dark $script:Colors.IsDark })
+
+    $lbl = New-Object System.Windows.Forms.Label
+    $lbl.Text = $Prompt
+    $lbl.Location = New-Object System.Drawing.Point(20, 18)
+    $lbl.Size = New-Object System.Drawing.Size(365, 24)
+    $dlg.Controls.Add($lbl)
+
+    $txt = New-Object System.Windows.Forms.TextBox
+    $txt.Location = New-Object System.Drawing.Point(20, 46)
+    $txt.Size = New-Object System.Drawing.Size(365, 26)
+    $txt.Text = $Default
+    $txt.BackColor = $c.GridBack; $txt.ForeColor = $c.Fore; $txt.BorderStyle = 'FixedSingle'
+    $dlg.Controls.Add($txt)
+
+    $ok = New-Object System.Windows.Forms.Button
+    $ok.Text = 'OK'; $ok.Location = New-Object System.Drawing.Point(20, 90)
+    $ok.Size = New-Object System.Drawing.Size(180, 34)
+    Style-Button $ok 'primary'; $ok.DialogResult = 'OK'
+    $dlg.Controls.Add($ok)
+
+    $no = New-Object System.Windows.Forms.Button
+    $no.Text = 'Cancel'; $no.Location = New-Object System.Drawing.Point(205, 90)
+    $no.Size = New-Object System.Drawing.Size(180, 34)
+    Style-Button $no 'normal'; $no.DialogResult = 'Cancel'
+    $dlg.Controls.Add($no)
+
+    $dlg.AcceptButton = $ok; $dlg.CancelButton = $no
+    $res = $dlg.ShowDialog($script:Form)
+    $value = $txt.Text
+    $dlg.Dispose()
+    if ($res -eq [System.Windows.Forms.DialogResult]::OK) { return $value.Trim() }
+    return $null
+}
+
+function Show-ProfilesDialog {
+    $c = $script:Colors
+    $account = Get-SelectedAccount
+
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text = 'Overwatch settings profiles'
+    $dlg.FormBorderStyle = 'FixedDialog'
+    $dlg.MaximizeBox = $false; $dlg.MinimizeBox = $false
+    $dlg.StartPosition = 'CenterParent'
+    $dlg.Size = New-Object System.Drawing.Size(560, 520)
+    $dlg.BackColor = $c.FormBack
+    $dlg.ForeColor = $c.Fore
+    $dlg.Font = New-Object System.Drawing.Font('Segoe UI', 10)
+    $dlg.Add_Shown({ Set-DarkTitleBar -TargetForm $this -Dark $script:Colors.IsDark })
+
+    $owPath = Get-OWSettingsPath
+    $lblInfo = New-Object System.Windows.Forms.Label
+    $pathText = 'Overwatch settings file NOT FOUND - launch Overwatch once.'
+    if ($owPath) { $pathText = $owPath }
+    $lblInfo.Text = "A profile snapshots Overwatch's local settings file:" + [Environment]::NewLine + $pathText
+    $lblInfo.Location = New-Object System.Drawing.Point(20, 14)
+    $lblInfo.Size = New-Object System.Drawing.Size(500, 40)
+    $lblInfo.Font = New-Object System.Drawing.Font('Segoe UI', 8.5)
+    $lblInfo.ForeColor = $c.Subtle
+    $dlg.Controls.Add($lblInfo)
+
+    $lblScope = New-Object System.Windows.Forms.Label
+    $lblScope.Text = "Covers: FPS cap, refresh rate, graphics preset, render scale, contrast," + [Environment]::NewLine +
+                     "FPS/latency overlays, window mode, master + music volume." + [Environment]::NewLine +
+                     "NOT covered: sensitivity, crosshairs, keybinds - Overwatch stores those" + [Environment]::NewLine +
+                     "server-side per account, so they already follow each account by themselves."
+    $lblScope.Location = New-Object System.Drawing.Point(20, 58)
+    $lblScope.Size = New-Object System.Drawing.Size(500, 68)
+    $lblScope.Font = New-Object System.Drawing.Font('Segoe UI', 8.5)
+    $lblScope.ForeColor = $c.Subtle
+    $dlg.Controls.Add($lblScope)
+
+    $lst = New-Object System.Windows.Forms.ListBox
+    $lst.Location = New-Object System.Drawing.Point(20, 134)
+    $lst.Size = New-Object System.Drawing.Size(300, 180)
+    $lst.BackColor = $c.GridBack; $lst.ForeColor = $c.Fore
+    $lst.BorderStyle = 'FixedSingle'
+    $dlg.Controls.Add($lst)
+
+    function Refresh-ProfileList {
+        $lst.Items.Clear()
+        foreach ($p in Get-SettingsProfiles) { [void]$lst.Items.Add($p) }
+    }
+    Refresh-ProfileList
+
+    $bx = 334; $by = 134
+    $btnNew = New-Object System.Windows.Forms.Button
+    $btnNew.Text = 'Save current as...'
+    $btnNew.Location = New-Object System.Drawing.Point($bx, $by)
+    $btnNew.Size = New-Object System.Drawing.Size(186, 34)
+    Style-Button $btnNew 'primary'
+    $btnNew.Add_Click({
+        $name = Show-InputDialog -Title 'New profile' -Prompt 'Profile name (e.g. Competitive, Streaming):'
+        if ($name) {
+            if (Save-SettingsProfile -Name $name) { Refresh-ProfileList; Set-Status "Saved settings profile '$name'" }
+        }
+    })
+    $dlg.Controls.Add($btnNew); $by += 40
+
+    $btnApply = New-Object System.Windows.Forms.Button
+    $btnApply.Text = 'Apply to game'
+    $btnApply.Location = New-Object System.Drawing.Point($bx, $by)
+    $btnApply.Size = New-Object System.Drawing.Size(186, 34)
+    Style-Button $btnApply 'normal'
+    $btnApply.Add_Click({
+        if ($lst.SelectedItem) {
+            if (Apply-SettingsProfile -Name ([string]$lst.SelectedItem)) {
+                Set-Status "Applied profile '$($lst.SelectedItem)' to Overwatch"
+                [System.Windows.Forms.MessageBox]::Show("Profile applied. It takes effect next time Overwatch starts.", 'Applied', 'OK', 'Information') | Out-Null
+            }
+        }
+    })
+    $dlg.Controls.Add($btnApply); $by += 40
+
+    $btnOverwrite = New-Object System.Windows.Forms.Button
+    $btnOverwrite.Text = 'Update from game'
+    $btnOverwrite.Location = New-Object System.Drawing.Point($bx, $by)
+    $btnOverwrite.Size = New-Object System.Drawing.Size(186, 34)
+    Style-Button $btnOverwrite 'normal'
+    $btnOverwrite.Add_Click({
+        if ($lst.SelectedItem) {
+            $n = [string]$lst.SelectedItem
+            if (Save-SettingsProfile -Name $n) { Set-Status "Profile '$n' updated from current game settings" }
+        }
+    })
+    $dlg.Controls.Add($btnOverwrite); $by += 40
+
+    $btnDel = New-Object System.Windows.Forms.Button
+    $btnDel.Text = 'Delete profile'
+    $btnDel.Location = New-Object System.Drawing.Point($bx, $by)
+    $btnDel.Size = New-Object System.Drawing.Size(186, 34)
+    Style-Button $btnDel 'danger'
+    $btnDel.Add_Click({
+        if ($lst.SelectedItem) {
+            $n = [string]$lst.SelectedItem
+            $ask = [System.Windows.Forms.MessageBox]::Show("Delete profile '$n'? It will also be unbound from any account.", 'Delete profile', 'YesNo', 'Warning')
+            if ($ask -eq [System.Windows.Forms.DialogResult]::Yes) {
+                Remove-SettingsProfile -Name $n
+                Refresh-ProfileList
+                Set-Status "Deleted profile '$n'"
+            }
+        }
+    })
+    $dlg.Controls.Add($btnDel)
+
+    # Binding
+    $lblBind = New-Object System.Windows.Forms.Label
+    $bindTarget = 'no account selected'
+    if ($account) { $bindTarget = $account }
+    $lblBind.Text = "Profile to auto-apply when switching to:  $bindTarget"
+    $lblBind.Location = New-Object System.Drawing.Point(20, 330)
+    $lblBind.Size = New-Object System.Drawing.Size(500, 24)
+    $dlg.Controls.Add($lblBind)
+
+    $cmbBind = New-Object System.Windows.Forms.ComboBox
+    $cmbBind.DropDownStyle = 'DropDownList'
+    $cmbBind.Location = New-Object System.Drawing.Point(20, 358)
+    $cmbBind.Size = New-Object System.Drawing.Size(500, 26)
+    $cmbBind.FlatStyle = 'Flat'
+    $cmbBind.BackColor = $c.ButtonBack; $cmbBind.ForeColor = $c.Fore
+    [void]$cmbBind.Items.Add('(none - leave settings alone)')
+    foreach ($p in Get-SettingsProfiles) { [void]$cmbBind.Items.Add($p) }
+    $cmbBind.SelectedIndex = 0
+    if ($account) {
+        $bound = [string](Get-AccountMeta $account).Profile
+        if ($bound) {
+            $idx = $cmbBind.Items.IndexOf($bound)
+            if ($idx -ge 0) { $cmbBind.SelectedIndex = $idx }
+        }
+    }
+    if (-not $account) { $cmbBind.Enabled = $false }
+    $dlg.Controls.Add($cmbBind)
+
+    $btnSave = New-Object System.Windows.Forms.Button
+    $btnSave.Text = 'Save binding & close'
+    $btnSave.Location = New-Object System.Drawing.Point(20, 402)
+    $btnSave.Size = New-Object System.Drawing.Size(250, 36)
+    Style-Button $btnSave 'primary'
+    $btnSave.DialogResult = 'OK'
+    $dlg.Controls.Add($btnSave)
+
+    $btnClose = New-Object System.Windows.Forms.Button
+    $btnClose.Text = 'Close'
+    $btnClose.Location = New-Object System.Drawing.Point(280, 402)
+    $btnClose.Size = New-Object System.Drawing.Size(240, 36)
+    Style-Button $btnClose 'normal'
+    $btnClose.DialogResult = 'Cancel'
+    $dlg.Controls.Add($btnClose)
+
+    $dlg.AcceptButton = $btnSave; $dlg.CancelButton = $btnClose
+
+    $res = $dlg.ShowDialog($script:Form)
+    if ($res -eq [System.Windows.Forms.DialogResult]::OK -and $account) {
+        $meta = Get-AccountMeta $account
+        if ($cmbBind.SelectedIndex -le 0) { $meta.Profile = '' }
+        else { $meta.Profile = [string]$cmbBind.SelectedItem }
+        $script:AccountStore[$account] = $meta
+        Save-AccountStore
+        Reload-AccountRows
+        Start-AllRankFetches
+        if ($meta.Profile) { Set-Status "$account will use settings profile '$($meta.Profile)'" }
+        else { Set-Status "$account will not change Overwatch settings" }
+    }
+    $dlg.Dispose()
+}
+
+#--------------------------------------
 # SWITCH LOGIC
 #--------------------------------------
 function Confirm-FlaggedSwitch {
@@ -1146,6 +1540,15 @@ function Invoke-AccountSwitch {
         Get-Process 'Battle.net' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
         Start-Sleep -Milliseconds 400
 
+        # Apply this account's bound settings profile while Overwatch is closed
+        if ($script:Settings.ApplyProfileOnSwitch -and -not [string]::IsNullOrWhiteSpace([string]$meta.Profile)) {
+            if (Apply-SettingsProfile -Name ([string]$meta.Profile) -Silent $true) {
+                Write-DebugLog "Applied profile '$($meta.Profile)' for $Account"
+            } else {
+                Write-DebugLog "Could not apply profile '$($meta.Profile)' for $Account"
+            }
+        }
+
         if ($script:BattleNetExe -and (Test-Path $script:BattleNetExe)) {
             if ($script:Settings.LaunchOverwatch) {
                 Start-Process $script:BattleNetExe -ArgumentList '--exec="launch Pro"'
@@ -1174,7 +1577,7 @@ function Show-SettingsDialog {
     $dlg.FormBorderStyle = 'FixedDialog'
     $dlg.MaximizeBox = $false; $dlg.MinimizeBox = $false
     $dlg.StartPosition = 'CenterParent'
-    $dlg.Size = New-Object System.Drawing.Size(440, 620)
+    $dlg.Size = New-Object System.Drawing.Size(440, 690)
     $dlg.BackColor = $c.FormBack
     $dlg.ForeColor = $c.Fore
     $dlg.Font = New-Object System.Drawing.Font('Segoe UI', 10)
@@ -1226,6 +1629,8 @@ function Show-SettingsDialog {
         @{ Key = 'WarnOnFlagged';          Text = 'Warn before switching to a flagged account' },
         @{ Key = 'ConfirmRemoval';         Text = 'Confirm before removing an account' },
         @{ Key = 'ShowRankIcons';          Text = 'Show rank icons in the grid' },
+        @{ Key = 'ShowPlayerIcons';        Text = 'Show player avatars and namecards' },
+        @{ Key = 'ApplyProfileOnSwitch';   Text = 'Apply bound Overwatch settings profile on switch' },
         @{ Key = 'FetchRanksOnStart';      Text = 'Fetch ranks automatically on startup' },
         @{ Key = 'AutoLaunchBattleNet';    Text = 'Relaunch Battle.net after switching' },
         @{ Key = 'LaunchOverwatch';        Text = 'Launch Overwatch 2 directly after switching' },
@@ -1335,6 +1740,9 @@ $miSwitch.Add_Click({ $a = Get-SelectedAccount; if ($a) { Invoke-AccountSwitch $
 $miStatus = $script:Menu.Items.Add('Set status / note...')
 $miStatus.Add_Click({ $a = Get-SelectedAccount; if ($a) { Show-StatusDialog $a } })
 
+$miProfile = $script:Menu.Items.Add('Overwatch settings profile...')
+$miProfile.Add_Click({ Show-ProfilesDialog })
+
 [void]$script:Menu.Items.Add('-')
 
 $miRefresh = $script:Menu.Items.Add('Refresh this rank')
@@ -1378,6 +1786,101 @@ $script:Grid.Add_CellPainting({
     param($sender, $e)
     if ($e.RowIndex -lt 0 -or $e.ColumnIndex -lt 0) { return }
     $colName = $sender.Columns[$e.ColumnIndex].Name
+
+    #-- Account cell: namecard wash, avatar, name, title/endorsement subtitle
+    if ($colName -eq 'Account') {
+        $e.PaintBackground($e.CellBounds, $true)
+        $cos = $sender.Rows[$e.RowIndex].Cells['Account'].Tag
+        $b = $e.CellBounds
+        $isActive = ($e.RowIndex -eq 0)
+        $selectedRow = (($e.State -band [System.Windows.Forms.DataGridViewElementStates]::Selected) -ne 0)
+
+        # Namecard art on the right, faded out to the left so text stays readable
+        if ($cos -and $cos.Namecard -and $script:Settings.ShowPlayerIcons) {
+            try {
+                $cm = New-Object System.Drawing.Imaging.ColorMatrix
+                $cm.Matrix33 = 0.38
+                $ia = New-Object System.Drawing.Imaging.ImageAttributes
+                $ia.SetColorMatrix($cm)
+                $nc = $cos.Namecard
+                $dest = New-Object System.Drawing.Rectangle($b.X, $b.Y, $b.Width, $b.Height)
+                $e.Graphics.DrawImage($nc, $dest, 0, 0, $nc.Width, $nc.Height, [System.Drawing.GraphicsUnit]::Pixel, $ia)
+                $ia.Dispose()
+
+                # Scrim: solid at the left (behind avatar + text), clearing to the right
+                $bg = $e.CellStyle.BackColor
+                if ($selectedRow) { $bg = $e.CellStyle.SelectionBackColor }
+                $c1 = [System.Drawing.Color]::FromArgb(255, $bg.R, $bg.G, $bg.B)
+                $c2 = [System.Drawing.Color]::FromArgb(0,   $bg.R, $bg.G, $bg.B)
+                $gr = New-Object System.Drawing.Rectangle($b.X, $b.Y, [int]($b.Width * 0.92), $b.Height)
+                $lg = New-Object System.Drawing.Drawing2D.LinearGradientBrush($gr, $c1, $c2, 0.0)
+                $e.Graphics.FillRectangle($lg, $gr)
+                $lg.Dispose()
+            } catch { }
+        }
+
+        # Orange marker bar on the active account
+        $x = $b.X + 6
+        if ($isActive) {
+            try {
+                $bar = New-Object System.Drawing.SolidBrush($script:Colors.Accent)
+                $e.Graphics.FillRectangle($bar, $b.X + 1, $b.Y + 4, 4, $b.Height - 8)
+                $bar.Dispose()
+            } catch { }
+        }
+        $x += 6
+
+        # Avatar
+        if ($cos -and $cos.Avatar -and $script:Settings.ShowPlayerIcons) {
+            $sz = 34
+            $ay = $b.Y + [int](($b.Height - $sz) / 2)
+            try {
+                $e.Graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+                $e.Graphics.DrawImage($cos.Avatar, $x, $ay, $sz, $sz)
+                $pen = New-Object System.Drawing.Pen($script:Colors.Border, 1)
+                $e.Graphics.DrawRectangle($pen, $x, $ay, $sz, $sz)
+                $pen.Dispose()
+            } catch { }
+            $x += $sz + 8
+        }
+
+        $fore = $e.CellStyle.ForeColor
+        if ($selectedRow) { $fore = $e.CellStyle.SelectionForeColor }
+        if ($isActive) { $fore = $script:Colors.Accent }
+
+        $name = ''
+        if ($null -ne $e.FormattedValue) { $name = [string]$e.FormattedValue }
+        $sub = ''
+        if ($cos) {
+            $parts = @()
+            if ($cos.Title) { $parts += [string]$cos.Title }
+            if ([int]$cos.Endorsement -gt 0) { $parts += "End. $([int]$cos.Endorsement)" }
+            $sub = ($parts -join '  -  ')
+        }
+
+        $availW = $b.Right - $x - 4
+        if ($availW -gt 0) {
+            $flags = [System.Windows.Forms.TextFormatFlags]::Left -bor [System.Windows.Forms.TextFormatFlags]::EndEllipsis
+            if ($sub) {
+                $r1 = New-Object System.Drawing.Rectangle($x, ($b.Y + 5), $availW, 20)
+                $r2 = New-Object System.Drawing.Rectangle($x, ($b.Y + 25), $availW, 18)
+                $f1 = New-Object System.Drawing.Font('Segoe UI Semibold', 10)
+                $f2 = New-Object System.Drawing.Font('Segoe UI', 8.25)
+                [System.Windows.Forms.TextRenderer]::DrawText($e.Graphics, $name, $f1, $r1, $fore, $flags)
+                [System.Windows.Forms.TextRenderer]::DrawText($e.Graphics, $sub, $f2, $r2, $script:Colors.Subtle, $flags)
+                $f1.Dispose(); $f2.Dispose()
+            } else {
+                $r1 = New-Object System.Drawing.Rectangle($x, $b.Y, $availW, $b.Height)
+                $vflags = $flags -bor [System.Windows.Forms.TextFormatFlags]::VerticalCenter
+                $f1 = New-Object System.Drawing.Font('Segoe UI Semibold', 10)
+                [System.Windows.Forms.TextRenderer]::DrawText($e.Graphics, $name, $f1, $r1, $fore, $vflags)
+                $f1.Dispose()
+            }
+        }
+        $e.Handled = $true
+        return
+    }
+
     if ($script:RoleColumns -notcontains $colName) { return }
 
     $e.PaintBackground($e.CellBounds, $true)
@@ -1477,6 +1980,7 @@ $script:Form.Add_KeyDown({
 $script:SwitchBtn.Add_Click({ $a = Get-SelectedAccount; if ($a) { Invoke-AccountSwitch $a } })
 $script:RefreshBtn.Add_Click({ Start-AllRankFetches })
 $script:StatusBtn.Add_Click({ $a = Get-SelectedAccount; if ($a) { Show-StatusDialog $a } })
+$script:ProfileBtn.Add_Click({ Show-ProfilesDialog })
 $script:RemoveBtn.Add_Click({ $a = Get-SelectedAccount; if ($a) { Remove-AccountEntry $a } })
 $script:SettingsBtn.Add_Click({ Show-SettingsDialog })
 
@@ -1523,16 +2027,31 @@ if ($env:BNS_SMOKETEST) {
                 $script:Settings.ConfirmRemoval = $false
                 Remove-AccountEntry $env:BNS_SMOKE_REMOVE
             }
+            $profileResult = ''
+            if ($env:BNS_SMOKE_PROFILE) {
+                $saved = Save-SettingsProfile -Name $env:BNS_SMOKE_PROFILE
+                $applied = Apply-SettingsProfile -Name $env:BNS_SMOKE_PROFILE -Silent $true
+                $profileResult = "saved=$saved applied=$applied list=$((Get-SettingsProfiles) -join ',')"
+            }
             $dump = [ordered]@{
                 Accounts = @($script:Accounts)
+                OWSettingsPath = [string](Get-OWSettingsPath)
+                ProfileTest = $profileResult
                 Rows = @(foreach ($row in $script:Grid.Rows) {
+                    $cos = $row.Cells['Account'].Tag
                     [ordered]@{
                         Account   = [string]$row.Tag
                         Display   = [string]$row.Cells['Account'].Value
                         Status    = [string]$row.Cells['Status'].Value
                         BattleTag = [string]$row.Cells['BattleTag'].Value
+                        Profile   = [string](Get-AccountMeta ([string]$row.Tag)).Profile
                         Support   = [string]$row.Cells['Support'].Value
-                        HasIcon   = ($null -ne $row.Cells['Support'].Tag)
+                        HasRankIcon = ($null -ne $row.Cells['Support'].Tag)
+                        PlayerName  = $(if ($cos) { [string]$cos.Username } else { '' })
+                        Title       = $(if ($cos) { [string]$cos.Title } else { '' })
+                        Endorsement = $(if ($cos) { [int]$cos.Endorsement } else { 0 })
+                        HasAvatar   = ($null -ne $cos -and $null -ne $cos.Avatar)
+                        HasNamecard = ($null -ne $cos -and $null -ne $cos.Namecard)
                     }
                 })
             }

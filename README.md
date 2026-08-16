@@ -50,10 +50,31 @@ The original tool worked, but the rank column never populated. Three separate bu
 > that never played Overwatch. Auto-flagging on that would label working accounts as banned. **Status flags are
 > set by you, manually**, which is why they're trustworthy.
 
+### Overwatch settings profiles
+Save named snapshots of Overwatch's local settings file and bind one to each account — it's applied
+automatically on switch, while the game is closed.
+
+- Save the current in-game settings as a named profile (e.g. `Competitive`, `Streaming`).
+- Bind a profile to an account; switching to that account applies it before Battle.net relaunches.
+- Update a profile from your current settings, or apply one on demand.
+- Backs up the existing file first, and refuses to write while Overwatch is running (the game rewrites
+  that file on exit and would discard the change).
+
+**What a profile covers:** FPS cap, refresh rate, graphics preset, render scale, contrast, FPS/latency
+overlays, window mode, master and music volume.
+
+> **What it deliberately does *not* cover:** sensitivity, crosshairs and keybinds. Overwatch 2 does not
+> store those locally — they're synced server-side per account, so they **already follow each account
+> automatically**. A local preset for them would be redundant and would simply be overwritten by the
+> cloud on login.
+
 ### Interface
-- Dark mode by default, including a proper dark title bar. Light and Auto (follow Windows) also available.
+- Overwatch-inspired dark theme by default — deep slate with the signature orange accent, and a proper
+  dark title bar. Light and Auto (follow Windows) also available.
+- **Player identity per account** — avatar, career title, endorsement level and namecard art, pulled from
+  the same API call as the ranks, so it costs no extra requests.
 - Resizable window that remembers its size.
-- Active account marked with a coloured ●.
+- Active account marked with an orange bar.
 - **Streamer mode** — masks account emails (`ab•••`) so they never appear on stream.
 - Right-click any row for switch / status / refresh / copy email / remove.
 - Status bar, per-cell tooltips, `F5` to refresh ranks, `Del` to remove.
@@ -113,7 +134,10 @@ Keep `bnet-switcher.ico` beside the script if you want the window icon.
 | `%APPDATA%\BNetSwitcher\accounts.json` | Your BattleTags, status flags and notes |
 | `%APPDATA%\BNetSwitcher\settings.json` | App settings |
 | `%APPDATA%\BNetSwitcher\rankicons\` | Cached rank badge images |
+| `%APPDATA%\BNetSwitcher\playericons\` | Cached avatar and namecard images |
+| `%APPDATA%\BNetSwitcher\profiles\` | Saved Overwatch settings profiles |
 | `%APPDATA%\BNetSwitcher\removed-accounts.json` | Recovery log of removed accounts |
+| `Documents\Overwatch\Settings\Settings_v0.ini` | Read when saving a profile; written when applying one (backed up first) |
 
 Nothing is written inside the repo folder, so your account data can never end up in a commit.
 
