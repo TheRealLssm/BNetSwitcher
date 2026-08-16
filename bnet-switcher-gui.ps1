@@ -547,7 +547,7 @@ $ErrorActionPreference = 'Stop'
 
 $result = @{
     Ok = $false; Error = ''; Season = $null; Username = ''; Updated = $null; Roles = @{}
-    Title = ''; Endorsement = 0; Avatar = ''; Namecard = ''
+    Title = ''; Endorsement = 0; Avatar = ''; Namecard = ''; Private = $false
 }
 $dash = [string][char]0x2013
 
@@ -622,10 +622,25 @@ try {
             $result.Roles[$col] = @{ Text = $dash; Icon = '' }
         }
     }
+    # No ranks at all can mean two very different things: the career profile is
+    # private (Overwatch defaults profiles to private), or it is public but has
+    # no competitive placement. The summary endpoint cannot tell them apart, but
+    # the full player endpoint returns a null "stats" block only when private.
+    $anyRank = $false
+    foreach ($k in $result.Roles.Keys) {
+        if ($result.Roles[$k].Text -ne $dash) { $anyRank = $true; break }
+    }
+    if (-not $anyRank) {
+        try {
+            $full = Invoke-RestMethod -Uri "https://overfast-api.tekrop.fr/players/$normalized" -UseBasicParsing -TimeoutSec 15
+            if ($null -eq $full.stats) { $result.Private = $true }
+        } catch { }
+    }
+
     $result.Ok = $true
 } catch {
     $msg = [string]$_.Exception.Message
-    if     ($msg -match '404')       { $result.Error = 'Not found' }
+    if     ($msg -match '404')       { $result.Error = 'No profile' }
     elseif ($msg -match '422')       { $result.Error = 'Bad tag' }
     elseif ($msg -match '429|503')   { $result.Error = 'Rate limited' }
     elseif ($msg -match 'timed out') { $result.Error = 'Timeout' }
@@ -681,21 +696,42 @@ function Process-RankJobs {
         if (-not $res -or -not $res.Ok) {
             $err = 'API error'
             if ($res -and $res.Error) { $err = [string]$res.Error }
+            $tip = "Rank lookup failed for $($job.BattleTag): $err"
+            if ($err -eq 'No profile') {
+                $tip = "No Overwatch profile could be read for '$($job.BattleTag)'." + [Environment]::NewLine +
+                       "Most often the BattleTag is off - the digits after # matter," + [Environment]::NewLine +
+                       "and they are not part of your login email." + [Environment]::NewLine +
+                       "An account that never played Overwatch has no profile," + [Environment]::NewLine +
+                       "and a hidden profile may also be unreadable." + [Environment]::NewLine +
+                       "This says nothing about ban status."
+            }
             foreach ($col in $script:RoleColumns) {
                 $row.Cells[$col].Value = $err
                 $row.Cells[$col].Tag = $null
-                $row.Cells[$col].ToolTipText = "Rank lookup failed for $($job.BattleTag): $err`n(This says nothing about ban status - see Set status.)"
+                $row.Cells[$col].ToolTipText = $tip
             }
             Write-DebugLog "Fetch failed for $($job.BattleTag): $err"
         } else {
             $seasonText = ''
             if ($res.Season) { $seasonText = " (Season $($res.Season))" }
+            $isPrivate = [bool]$res.Private
+            $privateTip = "This career profile is private, so ranks cannot be read." + [Environment]::NewLine +
+                          "In Overwatch: Options > Social > Career Profile Visibility >" + [Environment]::NewLine +
+                          "set it to Public, then press F5 here." + [Environment]::NewLine +
+                          "(Overwatch sets profiles to private by default.)"
             foreach ($col in $script:RoleColumns) {
                 $roleData = $res.Roles[$col]
                 if ($roleData) {
-                    $row.Cells[$col].Value = [string]$roleData.Text
-                    $row.Cells[$col].Tag = Get-CachedImage ([string]$roleData.Icon)
-                    $row.Cells[$col].ToolTipText = "$($script:Grid.Columns[$col].HeaderText): $($roleData.Text)$seasonText"
+                    $text = [string]$roleData.Text
+                    if ($isPrivate -and $text -eq $script:GlyphDash) {
+                        $row.Cells[$col].Value = 'Private'
+                        $row.Cells[$col].Tag = $null
+                        $row.Cells[$col].ToolTipText = $privateTip
+                    } else {
+                        $row.Cells[$col].Value = $text
+                        $row.Cells[$col].Tag = Get-CachedImage ([string]$roleData.Icon)
+                        $row.Cells[$col].ToolTipText = "$($script:Grid.Columns[$col].HeaderText): $text$seasonText"
+                    }
                 }
             }
             if ($res.Username) { $row.Cells['BattleTag'].ToolTipText = "Profile: $($res.Username)$seasonText" }
