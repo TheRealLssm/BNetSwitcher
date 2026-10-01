@@ -155,6 +155,7 @@ Keep `bnet-switcher.ico` beside the script if you want the window icon.
 | `%APPDATA%\BNetSwitcher\playericons\` | Cached avatar and namecard images |
 | `%APPDATA%\BNetSwitcher\profiles\` | Saved Overwatch settings profiles |
 | `%APPDATA%\BNetSwitcher\removed-accounts.json` | Recovery log of removed accounts |
+| `%APPDATA%\BNetSwitcher\network.log` | Every outbound request: time, host, resolved IP, result (capped at ~1 MB) |
 | `Documents\Overwatch\Settings\Settings_v0.ini` | Read when saving a profile; written when applying one (backed up first) |
 
 Nothing is written inside the repo folder, so your account data can never end up in a commit.
@@ -165,9 +166,18 @@ Nothing is written inside the repo folder, so your account data can never end up
 
 - **No passwords, ever.** The app never reads, stores, or transmits credentials. Battle.net handles all authentication.
 - **No telemetry.** No analytics, no tracking, no phone-home.
-- **Two network calls only**, and only for accounts where *you* entered a BattleTag:
+- **Two kinds of network call only**, and only for accounts where *you* entered a BattleTag:
   1. `overfast-api.tekrop.fr` — public rank lookup
-  2. `static.playoverwatch.com` — Blizzard's CDN, for rank badge images
+  2. Blizzard's image hosts (`*.playoverwatch.com`, `d15f34w2p8l1cc.cloudfront.net`, `*.blizzard.com`) —
+     rank badges, avatars and namecards
+- **Image links are locked down.** The image addresses come from the API's response, so the app only follows
+  `https://` links to Blizzard's image hosts above, and refuses files over 5 MB. Anything else is skipped and
+  written to the network log as `BLOCKED`, so a bad or tampered response can't send your PC somewhere else.
+- **Network log.** Every request is logged to `network.log` with the IP it resolved to (Settings →
+  *Open network log*). If you see an unfamiliar IP in `netstat` or a firewall prompt, check the log: if it
+  isn't there, it didn't come from this app.
+- **Offline mode.** Settings → *Offline mode* turns off rank lookups, tag validation and image downloads.
+  The app then makes no network calls at all and just switches accounts.
 - **Backups before every config write.**
 - **Open source.** It's plain PowerShell — read exactly what it does before you run it.
 

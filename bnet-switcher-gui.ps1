@@ -77,6 +77,7 @@ $script:IconCacheDir       = Join-Path $script:DataFolder 'rankicons'
 $script:PlayerIconDir      = Join-Path $script:DataFolder 'playericons'
 $script:ProfileDir         = Join-Path $script:DataFolder 'profiles'
 $script:DebugLogPath       = Join-Path $script:DataFolder 'debug.log'
+$script:NetworkLogPath     = Join-Path $script:DataFolder 'network.log'
 $script:RemovedLogPath     = Join-Path $script:DataFolder 'removed-accounts.json'
 
 try {
@@ -111,6 +112,8 @@ $script:DefaultSettings = @{
     CloseOverwatchOnSwitch = $true
     StreamerMode           = $false
     DebugLogging           = $false
+    LogNetworkActivity     = $true
+    OfflineMode            = $false
     WarnOnFlagged          = $true
     ConfirmRemoval         = $true
     WindowWidth            = 0
@@ -145,6 +148,23 @@ function Write-DebugLog {
     if (-not $script:Settings.DebugLogging) { return }
     try {
         Add-Content -Path $script:DebugLogPath -Value ("[{0}] {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Message)
+    } catch { }
+}
+
+# Network log: one line per outbound request - when, which host, which IP it
+# resolved to, and what happened. Lets you check whether an unfamiliar IP in
+# netstat or a firewall prompt came from this app. Lines come from the rank
+# workers via their results, so only the UI thread ever writes the file.
+function Write-NetworkLog {
+    param([string[]]$Lines)
+    if (-not $script:Settings.LogNetworkActivity -or -not $Lines) { return }
+    try {
+        # Keep it small: once past 1 MB, keep only the newest 2000 lines
+        if ((Test-Path $script:NetworkLogPath) -and (Get-Item $script:NetworkLogPath).Length -gt 1MB) {
+            $keep = Get-Content $script:NetworkLogPath -Tail 2000
+            Set-Content -Path $script:NetworkLogPath -Value $keep -Encoding UTF8
+        }
+        Add-Content -Path $script:NetworkLogPath -Value $Lines -Encoding UTF8
     } catch { }
 }
 
@@ -548,8 +568,48 @@ $ErrorActionPreference = 'Stop'
 $result = @{
     Ok = $false; Error = ''; Season = $null; Username = ''; Updated = $null; Roles = @{}
     Title = ''; Endorsement = 0; Avatar = ''; Namecard = ''; Private = $false
+    Net = New-Object System.Collections.ArrayList
 }
 $dash = [string][char]0x2013
+
+# Image links come from the API's response, so they are only followed when they
+# are https and point at Blizzard's own image hosts. Anything else is refused
+# and logged, rather than letting a bad or tampered response send this PC to
+# an arbitrary server.
+$imageHosts = @('d15f34w2p8l1cc.cloudfront.net', 'blz-contentstack-images.akamaized.net')
+$imageHostSuffixes = @('.playoverwatch.com', '.blizzard.com', '.blz-contentstack.com')
+$maxImageBytes = 5MB
+
+function Test-ImageUrlAllowed {
+    param([Uri]$Uri)
+    if ($Uri.Scheme -ne 'https') { return $false }
+    $h = $Uri.Host.ToLowerInvariant()
+    if ($imageHosts -contains $h) { return $true }
+    foreach ($sfx in $imageHostSuffixes) {
+        if ($h.EndsWith($sfx) -or $h -eq $sfx.Substring(1)) { return $true }
+    }
+    return $false
+}
+
+# Record one request for the network log, with the IP the host resolved to
+function Add-NetLog {
+    param([Uri]$Uri, [string]$Outcome)
+    $ip = '?'
+    try { $ip = ([System.Net.Dns]::GetHostAddresses($Uri.Host) | ForEach-Object { $_.IPAddressToString }) -join ', ' } catch { }
+    [void]$result.Net.Add(("[{0}] {1} ({2}) {3} - {4}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Uri.Host, $ip, $Uri.AbsolutePath, $Outcome))
+}
+
+function Invoke-LoggedRest {
+    param([string]$Url, [int]$Timeout)
+    try {
+        $r = Invoke-RestMethod -Uri $Url -UseBasicParsing -TimeoutSec $Timeout
+        Add-NetLog ([Uri]$Url) 'OK'
+        return $r
+    } catch {
+        Add-NetLog ([Uri]$Url) ("failed: " + $_.Exception.Message)
+        throw
+    }
+}
 
 # Download an image once and return its local cached path.
 #
@@ -563,14 +623,31 @@ function Get-RemoteImage {
     param($Url, $Dir, $Prefix)
     if (-not $Url) { return '' }
     try {
-        $fname = [System.IO.Path]::GetFileName(([Uri]$Url).AbsolutePath)
+        $uri = [Uri]$Url
+        if (-not $uri.IsAbsoluteUri -or -not (Test-ImageUrlAllowed $uri)) {
+            [void]$result.Net.Add(("[{0}] BLOCKED image link to {1} (not a Blizzard https host)" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Url))
+            return ''
+        }
+        $fname = [System.IO.Path]::GetFileName($uri.AbsolutePath)
         $fname = ($fname -replace '[^A-Za-z0-9_.-]', '_')
         if ($Prefix) { $fname = "$Prefix-$fname" }
         $path = Join-Path $Dir $fname
         if (Test-Path $path) { return $path }
 
         $tmp = Join-Path $Dir ('tmp-' + [Guid]::NewGuid().ToString('N') + '.part')
-        Invoke-WebRequest -Uri $Url -OutFile $tmp -UseBasicParsing -TimeoutSec 30
+        try {
+            Invoke-WebRequest -Uri $Url -OutFile $tmp -UseBasicParsing -TimeoutSec 30
+            Add-NetLog $uri 'OK'
+        } catch {
+            Add-NetLog $uri ("failed: " + $_.Exception.Message)
+            throw
+        }
+        # A rank badge or avatar is a few KB; anything huge is not what we asked for
+        if ((Get-Item $tmp).Length -gt $maxImageBytes) {
+            Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+            [void]$result.Net.Add(("[{0}] DISCARDED oversized image from {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $uri.Host))
+            return ''
+        }
 
         if (Test-Path $path) {
             # Another fetch won the race; its copy is just as good
@@ -590,7 +667,7 @@ $normalized = ($BattleTag.Trim() -replace '\s', '') -replace '#', '-'
 $normalized = [Uri]::EscapeDataString($normalized)
 
 try {
-    $resp = Invoke-RestMethod -Uri "https://overfast-api.tekrop.fr/players/$normalized/summary" -UseBasicParsing -TimeoutSec 15
+    $resp = Invoke-LoggedRest "https://overfast-api.tekrop.fr/players/$normalized/summary" 15
     $comp = $null
     if ($resp.competitive) { $comp = $resp.competitive.$Platform }
     if ($comp -and $comp.season) { $result.Season = $comp.season }
@@ -632,7 +709,7 @@ try {
     }
     if (-not $anyRank) {
         try {
-            $full = Invoke-RestMethod -Uri "https://overfast-api.tekrop.fr/players/$normalized" -UseBasicParsing -TimeoutSec 15
+            $full = Invoke-LoggedRest "https://overfast-api.tekrop.fr/players/$normalized" 15
             if ($null -eq $full.stats) { $result.Private = $true }
         } catch { }
     }
@@ -656,6 +733,7 @@ $script:Jobs = New-Object System.Collections.ArrayList
 function Start-RankFetch {
     param($Row, [string]$BattleTag)
     if ($null -eq $Row -or [string]::IsNullOrWhiteSpace($BattleTag)) { return }
+    if ($script:Settings.OfflineMode) { return }   # no network calls at all
     foreach ($col in $script:RoleColumns) {
         $Row.Cells[$col].Value = '...'
         $Row.Cells[$col].Tag = $null
@@ -670,6 +748,10 @@ function Start-RankFetch {
 }
 
 function Start-AllRankFetches {
+    if ($script:Settings.OfflineMode) {
+        Set-Status 'Offline mode is on - rank lookups are disabled (Settings)'
+        return
+    }
     foreach ($row in $script:Grid.Rows) {
         $bt = [string]$row.Cells['BattleTag'].Value
         if (-not [string]::IsNullOrWhiteSpace($bt)) { Start-RankFetch -Row $row -BattleTag $bt }
@@ -685,13 +767,15 @@ function Process-RankJobs {
         try { $job.PS.Dispose() } catch { }
         $script:Jobs.Remove($job)
 
+        # Log the job's requests even if its row is gone or its tag was edited
+        $res = $null
+        if ($out) { $res = $out | Select-Object -Last 1 }
+        if ($res -and $res.Net) { Write-NetworkLog -Lines @($res.Net) }
+
         $row = $job.Row
         if ($null -eq $row -or $null -eq $row.DataGridView) { continue }   # row was removed
         $currentTag = ([string]$row.Cells['BattleTag'].Value)
         if ($currentTag.Trim() -ne $job.BattleTag) { continue }            # tag edited meanwhile
-
-        $res = $null
-        if ($out) { $res = $out | Select-Object -Last 1 }
 
         if (-not $res -or -not $res.Ok) {
             $err = 'API error'
@@ -1568,13 +1652,21 @@ function Parse-TagImport {
 
 function Test-BattleTagExists {
     param([string]$Tag)
+    if ($script:Settings.OfflineMode) { return 'Offline' }
     $n = ($Tag.Trim() -replace '\s','') -replace '#','-'
     $n = [Uri]::EscapeDataString($n)
+    $uri = [Uri]"https://overfast-api.tekrop.fr/players/$n/summary"
+    $ip = '?'
+    try { $ip = ([System.Net.Dns]::GetHostAddresses($uri.Host) | ForEach-Object { $_.IPAddressToString }) -join ', ' } catch { }
+    $stamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     try {
-        $null = Invoke-RestMethod -Uri "https://overfast-api.tekrop.fr/players/$n/summary" -UseBasicParsing -TimeoutSec 12
+        $null = Invoke-RestMethod -Uri $uri -UseBasicParsing -TimeoutSec 12
+        Write-NetworkLog -Lines ("[{0}] {1} ({2}) {3} - OK (tag check)" -f $stamp, $uri.Host, $ip, $uri.AbsolutePath)
         return 'OK'
     } catch {
-        if ([string]$_.Exception.Message -match '404') { return 'No profile' }
+        $msg = [string]$_.Exception.Message
+        Write-NetworkLog -Lines ("[{0}] {1} ({2}) {3} - failed (tag check): {4}" -f $stamp, $uri.Host, $ip, $uri.AbsolutePath, $msg)
+        if ($msg -match '404') { return 'No profile' }
         return 'Check failed'
     }
 }
@@ -1694,6 +1786,7 @@ function Show-ImportDialog {
     Style-Button $btnVal 'normal'
     $btnVal.Add_Click({
         if ($preview.Rows.Count -eq 0) { return }
+        if ($script:Settings.OfflineMode) { $status.Text = 'Offline mode is on - turn it off in Settings to validate tags.'; return }
         $dlg.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
         $n = 0
         foreach ($row in $preview.Rows) {
@@ -1912,7 +2005,7 @@ function Show-SettingsDialog {
     $dlg.FormBorderStyle = 'FixedDialog'
     $dlg.MaximizeBox = $false; $dlg.MinimizeBox = $false
     $dlg.StartPosition = 'CenterParent'
-    $dlg.Size = New-Object System.Drawing.Size(440, 736)
+    $dlg.Size = New-Object System.Drawing.Size(440, 836)
     $dlg.BackColor = $c.FormBack
     $dlg.ForeColor = $c.Fore
     $dlg.Font = New-Object System.Drawing.Font('Segoe UI', 10)
@@ -1972,6 +2065,8 @@ function Show-SettingsDialog {
         @{ Key = 'CloseOverwatchOnSwitch'; Text = 'Close Overwatch when switching accounts' },
         @{ Key = 'CloseAfterSwitch';       Text = 'Close this window after switching' },
         @{ Key = 'StreamerMode';           Text = 'Streamer mode (mask account emails)' },
+        @{ Key = 'OfflineMode';            Text = 'Offline mode (no rank lookups, no downloads)' },
+        @{ Key = 'LogNetworkActivity';     Text = 'Log every network request (network.log)' },
         @{ Key = 'DebugLogging';           Text = 'Write debug log (troubleshooting)' }
     )
     $checkBoxes = @{}
@@ -2016,6 +2111,21 @@ function Show-SettingsDialog {
     Style-Button $btnFolder 'normal'
     $btnFolder.Add_Click({ Start-Process explorer.exe $script:DataFolder })
     $dlg.Controls.Add($btnFolder)
+    $y += 40
+
+    $btnNetLog = New-Object System.Windows.Forms.Button
+    $btnNetLog.Text = 'Open network log'
+    $btnNetLog.Location = New-Object System.Drawing.Point($x, $y)
+    $btnNetLog.Size = New-Object System.Drawing.Size(380, 32)
+    Style-Button $btnNetLog 'normal'
+    $btnNetLog.Add_Click({
+        if (Test-Path $script:NetworkLogPath) {
+            Start-Process notepad.exe ('"' + $script:NetworkLogPath + '"')
+        } else {
+            [System.Windows.Forms.MessageBox]::Show("No network requests have been logged yet.`n`nThe log fills in as ranks are fetched.", 'Network log', 'OK', 'Information') | Out-Null
+        }
+    })
+    $dlg.Controls.Add($btnNetLog)
     $y += 48
 
     $btnSave = New-Object System.Windows.Forms.Button
@@ -2053,6 +2163,7 @@ function Show-SettingsDialog {
 
     $oldPlatform = [string]$script:Settings.Platform
     $oldStreamer = [bool]$script:Settings.StreamerMode
+    $oldOffline  = [bool]$script:Settings.OfflineMode
 
     switch ($cmbTheme.SelectedIndex) {
         1 { $script:Settings.Theme = 'Light' }
@@ -2066,7 +2177,8 @@ function Show-SettingsDialog {
 
     Apply-Theme
     if (([bool]$script:Settings.StreamerMode) -ne $oldStreamer) { Reload-AccountRows }
-    if (([string]$script:Settings.Platform) -ne $oldPlatform)   { Start-AllRankFetches }
+    if (([string]$script:Settings.Platform) -ne $oldPlatform -or
+        ($oldOffline -and -not $script:Settings.OfflineMode))     { Start-AllRankFetches }
     Set-Status 'Settings saved'
 }
 
