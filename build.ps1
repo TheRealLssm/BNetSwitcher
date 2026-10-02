@@ -33,6 +33,11 @@ if (-not [string]::IsNullOrEmpty($IconPath) -and -not [System.IO.Path]::IsPathRo
     $IconPath = Join-Path $ScriptPath $IconPath
 }
 
+# Windows PowerShell 5.1 defaults to TLS 1.0, which the PowerShell Gallery
+# rejects - Install-Module then fails with "Unable to resolve package source"
+# or a NuGet provider error that says nothing about TLS.
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072
+
 # Check for ps2exe module
 $ps2exeAvailable = $false
 
@@ -44,6 +49,11 @@ if ($ps2exeModule) {
 } else {
     Write-Host "Installing ps2exe module..." -ForegroundColor Cyan
     try {
+        # A fresh Windows has no NuGet provider; installing it here avoids an
+        # interactive prompt that -Force alone does not always suppress
+        if (-not (Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue)) {
+            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force -ErrorAction Stop | Out-Null
+        }
         Install-Module ps2exe -Scope CurrentUser -Force -ErrorAction Stop | Out-Null
         Write-Host "ps2exe module installed successfully" -ForegroundColor Green
         Import-Module ps2exe -ErrorAction Stop | Out-Null

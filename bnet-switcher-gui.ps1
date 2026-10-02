@@ -77,6 +77,7 @@ $script:IconCacheDir       = Join-Path $script:DataFolder 'rankicons'
 $script:PlayerIconDir      = Join-Path $script:DataFolder 'playericons'
 $script:ProfileDir         = Join-Path $script:DataFolder 'profiles'
 $script:DebugLogPath       = Join-Path $script:DataFolder 'debug.log'
+$script:NetworkLogPath     = Join-Path $script:DataFolder 'network.log'
 $script:RemovedLogPath     = Join-Path $script:DataFolder 'removed-accounts.json'
 
 try {
@@ -111,6 +112,8 @@ $script:DefaultSettings = @{
     CloseOverwatchOnSwitch = $true
     StreamerMode           = $false
     DebugLogging           = $false
+    LogNetworkActivity     = $true
+    OfflineMode            = $false
     WarnOnFlagged          = $true
     ConfirmRemoval         = $true
     WindowWidth            = 0
@@ -145,6 +148,23 @@ function Write-DebugLog {
     if (-not $script:Settings.DebugLogging) { return }
     try {
         Add-Content -Path $script:DebugLogPath -Value ("[{0}] {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Message)
+    } catch { }
+}
+
+# Network log: one line per outbound request - when, which host, which IP it
+# resolved to, and what happened. Lets you check whether an unfamiliar IP in
+# netstat or a firewall prompt came from this app. Lines come from the rank
+# workers via their results, so only the UI thread ever writes the file.
+function Write-NetworkLog {
+    param([string[]]$Lines)
+    if (-not $script:Settings.LogNetworkActivity -or -not $Lines) { return }
+    try {
+        # Keep it small: once past 1 MB, keep only the newest 2000 lines
+        if ((Test-Path $script:NetworkLogPath) -and (Get-Item $script:NetworkLogPath).Length -gt 1MB) {
+            $keep = Get-Content $script:NetworkLogPath -Tail 2000
+            Set-Content -Path $script:NetworkLogPath -Value $keep -Encoding UTF8
+        }
+        Add-Content -Path $script:NetworkLogPath -Value $Lines -Encoding UTF8
     } catch { }
 }
 
@@ -548,8 +568,83 @@ $ErrorActionPreference = 'Stop'
 $result = @{
     Ok = $false; Error = ''; Season = $null; Username = ''; Updated = $null; Roles = @{}
     Title = ''; Endorsement = 0; Avatar = ''; Namecard = ''; Private = $false
+    Net = New-Object System.Collections.ArrayList
+    ImageNotes = @{}   # why an image is missing, keyed Avatar / Banner / <role column>
 }
 $dash = [string][char]0x2013
+
+# Image links come from the API's response, so they are only followed when they
+# are https and point at Blizzard's own image hosts. Anything else is refused
+# and logged, rather than letting a bad or tampered response send this PC to
+# an arbitrary server.
+$imageHosts = @('d15f34w2p8l1cc.cloudfront.net', 'blz-contentstack-images.akamaized.net')
+$imageHostSuffixes = @('.playoverwatch.com', '.blizzard.com', '.blz-contentstack.com')
+$maxImageBytes = 5MB
+
+function Test-ImageUrlAllowed {
+    param([Uri]$Uri)
+    if ($Uri.Scheme -ne 'https') { return $false }
+    $h = $Uri.Host.ToLowerInvariant()
+    if ($imageHosts -contains $h) { return $true }
+    foreach ($sfx in $imageHostSuffixes) {
+        if ($h.EndsWith($sfx) -or $h -eq $sfx.Substring(1)) { return $true }
+    }
+    return $false
+}
+
+# Record one request for the network log, with the IP the host resolved to
+function Add-NetLog {
+    param([Uri]$Uri, [string]$Outcome)
+    $ip = '?'
+    try { $ip = ([System.Net.Dns]::GetHostAddresses($Uri.Host) | ForEach-Object { $_.IPAddressToString }) -join ', ' } catch { }
+    [void]$result.Net.Add(("[{0}] {1} ({2}) {3} - {4}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Uri.Host, $ip, $Uri.AbsolutePath, $Outcome))
+}
+
+# The rank service throttles busy periods (429/503), and a profile it has not
+# cached yet can take a while to build. Both clear up on their own, so those
+# get two more tries with a short wait instead of failing the whole row.
+function Invoke-LoggedRest {
+    param([string]$Url, [int]$Timeout)
+    $attempt = 0
+    while ($true) {
+        $attempt++
+        try {
+            $r = Invoke-RestMethod -Uri $Url -UseBasicParsing -TimeoutSec $Timeout
+            Add-NetLog ([Uri]$Url) 'OK'
+            return $r
+        } catch {
+            $msg = [string]$_.Exception.Message
+            Add-NetLog ([Uri]$Url) ("failed: " + $msg)
+            if ($attempt -ge 3 -or $msg -notmatch '429|503|timed out|timeout') { throw }
+            $wait = 3 * $attempt
+            try {
+                $ra = [int][string]$_.Exception.Response.Headers['Retry-After']
+                if ($ra -gt 0) { $wait = [Math]::Min($ra, 15) }
+            } catch { }
+            Start-Sleep -Seconds $wait
+        }
+    }
+}
+
+# Only formats WinForms can draw. Anything else (SVG, WebP, an HTML error page
+# saved as .png) used to be cached and then silently dropped by the grid.
+function Get-ImageKind {
+    param([string]$Path)
+    $fs = $null
+    try {
+        $fs = [System.IO.File]::OpenRead($Path)
+        $h = New-Object byte[] 12
+        $n = $fs.Read($h, 0, 12)
+    } catch { return 'unreadable' } finally { if ($fs) { $fs.Dispose() } }
+    if ($n -ge 4 -and $h[0] -eq 0x89 -and $h[1] -eq 0x50 -and $h[2] -eq 0x4E -and $h[3] -eq 0x47) { return 'png' }
+    if ($n -ge 3 -and $h[0] -eq 0xFF -and $h[1] -eq 0xD8 -and $h[2] -eq 0xFF) { return 'jpeg' }
+    if ($n -ge 4 -and $h[0] -eq 0x47 -and $h[1] -eq 0x49 -and $h[2] -eq 0x46 -and $h[3] -eq 0x38) { return 'gif' }
+    if ($n -ge 2 -and $h[0] -eq 0x42 -and $h[1] -eq 0x4D) { return 'bmp' }
+    if ($n -ge 12 -and $h[0] -eq 0x52 -and $h[8] -eq 0x57 -and $h[9] -eq 0x45 -and $h[10] -eq 0x42 -and $h[11] -eq 0x50) { return 'webp' }
+    $text = [System.Text.Encoding]::ASCII.GetString($h, 0, $n).TrimStart()
+    if ($text.StartsWith('<')) { return 'svg/html' }
+    return 'unknown'
+}
 
 # Download an image once and return its local cached path.
 #
@@ -560,17 +655,51 @@ $dash = [string][char]0x2013
 # would die with "file is being used by another process", silently losing that
 # account's icon.
 function Get-RemoteImage {
-    param($Url, $Dir, $Prefix)
-    if (-not $Url) { return '' }
+    param($Url, $Dir, $Prefix, $Label)
+    if (-not $Url) {
+        $result.ImageNotes[$Label] = 'not provided by the rank service'
+        return ''
+    }
     try {
-        $fname = [System.IO.Path]::GetFileName(([Uri]$Url).AbsolutePath)
+        $uri = [Uri]$Url
+        if (-not $uri.IsAbsoluteUri -or -not (Test-ImageUrlAllowed $uri)) {
+            [void]$result.Net.Add(("[{0}] BLOCKED image link to {1} (not a Blizzard https host)" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Url))
+            $result.ImageNotes[$Label] = 'blocked - the link was not a Blizzard image host (see network log)'
+            return ''
+        }
+        $fname = [System.IO.Path]::GetFileName($uri.AbsolutePath)
         $fname = ($fname -replace '[^A-Za-z0-9_.-]', '_')
         if ($Prefix) { $fname = "$Prefix-$fname" }
         $path = Join-Path $Dir $fname
-        if (Test-Path $path) { return $path }
+        if (Test-Path $path) {
+            if ((Get-ImageKind $path) -in @('png', 'jpeg', 'gif', 'bmp')) { return $path }
+            Remove-Item $path -Force -ErrorAction SilentlyContinue   # bad cache entry: fetch again
+        }
 
         $tmp = Join-Path $Dir ('tmp-' + [Guid]::NewGuid().ToString('N') + '.part')
-        Invoke-WebRequest -Uri $Url -OutFile $tmp -UseBasicParsing -TimeoutSec 30
+        try {
+            Invoke-WebRequest -Uri $Url -OutFile $tmp -UseBasicParsing -TimeoutSec 30
+            Add-NetLog $uri 'OK'
+        } catch {
+            Add-NetLog $uri ("failed: " + $_.Exception.Message)
+            $result.ImageNotes[$Label] = 'download failed: ' + $_.Exception.Message
+            Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+            return ''
+        }
+        # A rank badge or avatar is a few KB; anything huge is not what we asked for
+        if ((Get-Item $tmp).Length -gt $maxImageBytes) {
+            Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+            [void]$result.Net.Add(("[{0}] DISCARDED oversized image from {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $uri.Host))
+            $result.ImageNotes[$Label] = 'discarded - file was over 5 MB'
+            return ''
+        }
+        $kind = Get-ImageKind $tmp
+        if ($kind -notin @('png', 'jpeg', 'gif', 'bmp')) {
+            Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+            [void]$result.Net.Add(("[{0}] DISCARDED {1} file from {2} (not a drawable image)" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $kind, $uri.Host))
+            $result.ImageNotes[$Label] = "the server sent a file this app cannot draw ($kind)"
+            return ''
+        }
 
         if (Test-Path $path) {
             # Another fetch won the race; its copy is just as good
@@ -580,8 +709,10 @@ function Get-RemoteImage {
             catch { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
         }
         if (Test-Path $path) { return $path }
+        $result.ImageNotes[$Label] = 'could not be saved to the icon cache'
         return ''
     } catch {
+        $result.ImageNotes[$Label] = 'error: ' + $_.Exception.Message
         return ''
     }
 }
@@ -590,7 +721,7 @@ $normalized = ($BattleTag.Trim() -replace '\s', '') -replace '#', '-'
 $normalized = [Uri]::EscapeDataString($normalized)
 
 try {
-    $resp = Invoke-RestMethod -Uri "https://overfast-api.tekrop.fr/players/$normalized/summary" -UseBasicParsing -TimeoutSec 15
+    $resp = Invoke-LoggedRest "https://overfast-api.tekrop.fr/players/$normalized/summary" 25
     $comp = $null
     if ($resp.competitive) { $comp = $resp.competitive.$Platform }
     if ($comp -and $comp.season) { $result.Season = $comp.season }
@@ -598,8 +729,8 @@ try {
     if ($resp.last_updated_at) { $result.Updated = [long]$resp.last_updated_at }
     if ($resp.title) { $result.Title = [string]$resp.title }
     if ($resp.endorsement -and $resp.endorsement.level) { $result.Endorsement = [int]$resp.endorsement.level }
-    $result.Avatar   = Get-RemoteImage $resp.avatar   $PlayerIconDir 'av'
-    $result.Namecard = Get-RemoteImage $resp.namecard $PlayerIconDir 'nc'
+    $result.Avatar   = Get-RemoteImage $resp.avatar   $PlayerIconDir 'av' 'Avatar'
+    $result.Namecard = Get-RemoteImage $resp.namecard $PlayerIconDir 'nc' 'Banner'
 
     $map = @(
         @('Tank', 'tank'),
@@ -616,7 +747,7 @@ try {
             $div = $div.Substring(0, 1).ToUpper() + $div.Substring(1)
             $text = "$div $($node.tier)"
             # Rank badges are shared by every account at that rank - same race
-            $iconPath = Get-RemoteImage $node.rank_icon $CacheDir ''
+            $iconPath = Get-RemoteImage $node.rank_icon $CacheDir '' $col
             $result.Roles[$col] = @{ Text = $text; Icon = $iconPath }
         } else {
             $result.Roles[$col] = @{ Text = $dash; Icon = '' }
@@ -632,7 +763,7 @@ try {
     }
     if (-not $anyRank) {
         try {
-            $full = Invoke-RestMethod -Uri "https://overfast-api.tekrop.fr/players/$normalized" -UseBasicParsing -TimeoutSec 15
+            $full = Invoke-LoggedRest "https://overfast-api.tekrop.fr/players/$normalized" 25
             if ($null -eq $full.stats) { $result.Private = $true }
         } catch { }
     }
@@ -649,13 +780,16 @@ try {
 $result
 '@
 
-$script:RunspacePool = [runspacefactory]::CreateRunspacePool(1, 4)
+# Three at a time: the rank service rate-limits per IP, and more parallel
+# lookups mostly just earn 429s
+$script:RunspacePool = [runspacefactory]::CreateRunspacePool(1, 3)
 $script:RunspacePool.Open()
 $script:Jobs = New-Object System.Collections.ArrayList
 
 function Start-RankFetch {
     param($Row, [string]$BattleTag)
     if ($null -eq $Row -or [string]::IsNullOrWhiteSpace($BattleTag)) { return }
+    if ($script:Settings.OfflineMode) { return }   # no network calls at all
     foreach ($col in $script:RoleColumns) {
         $Row.Cells[$col].Value = '...'
         $Row.Cells[$col].Tag = $null
@@ -670,11 +804,29 @@ function Start-RankFetch {
 }
 
 function Start-AllRankFetches {
+    if ($script:Settings.OfflineMode) {
+        Set-Status 'Offline mode is on - rank lookups are disabled (Settings)'
+        return
+    }
     foreach ($row in $script:Grid.Rows) {
         $bt = [string]$row.Cells['BattleTag'].Value
         if (-not [string]::IsNullOrWhiteSpace($bt)) { Start-RankFetch -Row $row -BattleTag $bt }
     }
     if ($script:Jobs.Count -gt 0) { Set-Status "Fetching ranks for $($script:Jobs.Count) account(s)..." }
+}
+
+# Plain-language reason an image is missing, for tooltips
+function Get-ImageNote {
+    param($Res, [string]$Key, [string]$Path)
+    $note = $null
+    if ($Res.ImageNotes) { $note = $Res.ImageNotes[$Key] }
+    $notSent = ($note -eq 'not provided by the rank service') -or ((-not $note) -and (-not $Path))
+    if ($Key -eq 'Banner' -and $notSent) {
+        return 'Blizzard no longer lists banners for most BattleTag lookups, so the rank service had none to send. Nothing is wrong with the account.'
+    }
+    if ($note) { return [string]$note }
+    if ($Path) { return 'the downloaded file could not be read as an image' }
+    return 'not provided by the rank service'
 }
 
 function Process-RankJobs {
@@ -685,13 +837,15 @@ function Process-RankJobs {
         try { $job.PS.Dispose() } catch { }
         $script:Jobs.Remove($job)
 
+        # Log the job's requests even if its row is gone or its tag was edited
+        $res = $null
+        if ($out) { $res = $out | Select-Object -Last 1 }
+        if ($res -and $res.Net) { Write-NetworkLog -Lines @($res.Net) }
+
         $row = $job.Row
         if ($null -eq $row -or $null -eq $row.DataGridView) { continue }   # row was removed
         $currentTag = ([string]$row.Cells['BattleTag'].Value)
         if ($currentTag.Trim() -ne $job.BattleTag) { continue }            # tag edited meanwhile
-
-        $res = $null
-        if ($out) { $res = $out | Select-Object -Last 1 }
 
         if (-not $res -or -not $res.Ok) {
             $err = 'API error'
@@ -730,7 +884,12 @@ function Process-RankJobs {
                     } else {
                         $row.Cells[$col].Value = $text
                         $row.Cells[$col].Tag = Get-CachedImage ([string]$roleData.Icon)
-                        $row.Cells[$col].ToolTipText = "$($script:Grid.Columns[$col].HeaderText): $text$seasonText"
+                        $tip = "$($script:Grid.Columns[$col].HeaderText): $text$seasonText"
+                        # A rank with no badge: say why instead of leaving a blank gap
+                        if ($text -ne $script:GlyphDash -and $null -eq $row.Cells[$col].Tag -and $script:Settings.ShowRankIcons) {
+                            $tip += [Environment]::NewLine + 'Rank icon missing: ' + (Get-ImageNote $res $col ([string]$roleData.Icon))
+                        }
+                        $row.Cells[$col].ToolTipText = $tip
                     }
                 }
             }
@@ -749,6 +908,10 @@ function Process-RankJobs {
             if ($cos.Username)      { $bits += $cos.Username }
             if ($cos.Title)         { $bits += $cos.Title }
             if ($cos.Endorsement)   { $bits += "Endorsement $($cos.Endorsement)" }
+            if ($script:Settings.ShowPlayerIcons) {
+                if (-not $cos.Avatar)   { $bits += 'Avatar missing: ' + (Get-ImageNote $res 'Avatar' ([string]$res.Avatar)) }
+                if (-not $cos.Namecard) { $bits += 'Banner missing: ' + (Get-ImageNote $res 'Banner' ([string]$res.Namecard)) }
+            }
             if ($bits.Count -gt 0)  { $row.Cells['Account'].ToolTipText = ($bits -join "`n") }
 
             Write-DebugLog "Fetch OK for $($job.BattleTag)"
@@ -1568,13 +1731,23 @@ function Parse-TagImport {
 
 function Test-BattleTagExists {
     param([string]$Tag)
+    if ($script:Settings.OfflineMode) { return 'Offline' }
     $n = ($Tag.Trim() -replace '\s','') -replace '#','-'
     $n = [Uri]::EscapeDataString($n)
+    $uri = [Uri]"https://overfast-api.tekrop.fr/players/$n/summary"
+    $ip = '?'
+    try { $ip = ([System.Net.Dns]::GetHostAddresses($uri.Host) | ForEach-Object { $_.IPAddressToString }) -join ', ' } catch { }
+    $stamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     try {
-        $null = Invoke-RestMethod -Uri "https://overfast-api.tekrop.fr/players/$n/summary" -UseBasicParsing -TimeoutSec 12
+        $null = Invoke-RestMethod -Uri $uri -UseBasicParsing -TimeoutSec 20
+        Write-NetworkLog -Lines ("[{0}] {1} ({2}) {3} - OK (tag check)" -f $stamp, $uri.Host, $ip, $uri.AbsolutePath)
         return 'OK'
     } catch {
-        if ([string]$_.Exception.Message -match '404') { return 'No profile' }
+        $msg = [string]$_.Exception.Message
+        Write-NetworkLog -Lines ("[{0}] {1} ({2}) {3} - failed (tag check): {4}" -f $stamp, $uri.Host, $ip, $uri.AbsolutePath, $msg)
+        if ($msg -match '404') { return 'No profile' }
+        if ($msg -match '429|503') { return 'Busy - retry' }
+        if ($msg -match 'timed out|timeout') { return 'Timeout' }
         return 'Check failed'
     }
 }
@@ -1694,6 +1867,7 @@ function Show-ImportDialog {
     Style-Button $btnVal 'normal'
     $btnVal.Add_Click({
         if ($preview.Rows.Count -eq 0) { return }
+        if ($script:Settings.OfflineMode) { $status.Text = 'Offline mode is on - turn it off in Settings to validate tags.'; return }
         $dlg.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
         $n = 0
         foreach ($row in $preview.Rows) {
@@ -1707,9 +1881,11 @@ function Show-ImportDialog {
             else { $row.Cells['Valid'].Style.ForeColor = $script:Colors.Danger }
             [System.Windows.Forms.Application]::DoEvents()
         }
-        $bad = @($preview.Rows | Where-Object { [string]$_.Cells['Valid'].Value -ne 'OK' }).Count
+        $bad = @($preview.Rows | Where-Object { [string]$_.Cells['Valid'].Value -eq 'No profile' }).Count
+        $unsure = @($preview.Rows | Where-Object { @('OK', 'No profile') -notcontains [string]$_.Cells['Valid'].Value }).Count
         $dlg.Cursor = [System.Windows.Forms.Cursors]::Default
         if ($bad -gt 0) { $status.Text = "$bad tag(s) did not resolve - usually the digits after # are wrong." }
+        elseif ($unsure -gt 0) { $status.Text = "$unsure tag(s) could not be checked - the rank service is busy. Try again in a minute." }
         else { $status.Text = 'All tags resolved.' }
     })
     $dlg.Controls.Add($btnVal)
@@ -1912,7 +2088,7 @@ function Show-SettingsDialog {
     $dlg.FormBorderStyle = 'FixedDialog'
     $dlg.MaximizeBox = $false; $dlg.MinimizeBox = $false
     $dlg.StartPosition = 'CenterParent'
-    $dlg.Size = New-Object System.Drawing.Size(440, 736)
+    $dlg.Size = New-Object System.Drawing.Size(440, 836)
     $dlg.BackColor = $c.FormBack
     $dlg.ForeColor = $c.Fore
     $dlg.Font = New-Object System.Drawing.Font('Segoe UI', 10)
@@ -1972,6 +2148,8 @@ function Show-SettingsDialog {
         @{ Key = 'CloseOverwatchOnSwitch'; Text = 'Close Overwatch when switching accounts' },
         @{ Key = 'CloseAfterSwitch';       Text = 'Close this window after switching' },
         @{ Key = 'StreamerMode';           Text = 'Streamer mode (mask account emails)' },
+        @{ Key = 'OfflineMode';            Text = 'Offline mode (no rank lookups, no downloads)' },
+        @{ Key = 'LogNetworkActivity';     Text = 'Log every network request (network.log)' },
         @{ Key = 'DebugLogging';           Text = 'Write debug log (troubleshooting)' }
     )
     $checkBoxes = @{}
@@ -2016,6 +2194,21 @@ function Show-SettingsDialog {
     Style-Button $btnFolder 'normal'
     $btnFolder.Add_Click({ Start-Process explorer.exe $script:DataFolder })
     $dlg.Controls.Add($btnFolder)
+    $y += 40
+
+    $btnNetLog = New-Object System.Windows.Forms.Button
+    $btnNetLog.Text = 'Open network log'
+    $btnNetLog.Location = New-Object System.Drawing.Point($x, $y)
+    $btnNetLog.Size = New-Object System.Drawing.Size(380, 32)
+    Style-Button $btnNetLog 'normal'
+    $btnNetLog.Add_Click({
+        if (Test-Path $script:NetworkLogPath) {
+            Start-Process notepad.exe ('"' + $script:NetworkLogPath + '"')
+        } else {
+            [System.Windows.Forms.MessageBox]::Show("No network requests have been logged yet.`n`nThe log fills in as ranks are fetched.", 'Network log', 'OK', 'Information') | Out-Null
+        }
+    })
+    $dlg.Controls.Add($btnNetLog)
     $y += 48
 
     $btnSave = New-Object System.Windows.Forms.Button
@@ -2053,6 +2246,7 @@ function Show-SettingsDialog {
 
     $oldPlatform = [string]$script:Settings.Platform
     $oldStreamer = [bool]$script:Settings.StreamerMode
+    $oldOffline  = [bool]$script:Settings.OfflineMode
 
     switch ($cmbTheme.SelectedIndex) {
         1 { $script:Settings.Theme = 'Light' }
@@ -2066,7 +2260,8 @@ function Show-SettingsDialog {
 
     Apply-Theme
     if (([bool]$script:Settings.StreamerMode) -ne $oldStreamer) { Reload-AccountRows }
-    if (([string]$script:Settings.Platform) -ne $oldPlatform)   { Start-AllRankFetches }
+    if (([string]$script:Settings.Platform) -ne $oldPlatform -or
+        ($oldOffline -and -not $script:Settings.OfflineMode))     { Start-AllRankFetches }
     Set-Status 'Settings saved'
 }
 
@@ -2160,6 +2355,19 @@ $script:Grid.Add_CellPainting({
                 $c1 = [System.Drawing.Color]::FromArgb(255, $bg.R, $bg.G, $bg.B)
                 $c2 = [System.Drawing.Color]::FromArgb(0,   $bg.R, $bg.G, $bg.B)
                 $gr = New-Object System.Drawing.Rectangle($b.X, $b.Y, [int]($b.Width * 0.92), $b.Height)
+                $lg = New-Object System.Drawing.Drawing2D.LinearGradientBrush($gr, $c1, $c2, 0.0)
+                $e.Graphics.FillRectangle($lg, $gr)
+                $lg.Dispose()
+            } catch { }
+        } elseif ($cos -and $script:Settings.ShowPlayerIcons) {
+            # No banner from the rank service (common since Blizzard dropped them
+            # from BattleTag lookups): a faint accent wash on the right keeps the
+            # row looking finished instead of half-loaded
+            try {
+                $ac = $script:Colors.Accent
+                $gr = New-Object System.Drawing.Rectangle(($b.X + [int]($b.Width * 0.35)), $b.Y, ([int]($b.Width * 0.65) + 1), $b.Height)
+                $c1 = [System.Drawing.Color]::FromArgb(0,  $ac.R, $ac.G, $ac.B)
+                $c2 = [System.Drawing.Color]::FromArgb(34, $ac.R, $ac.G, $ac.B)
                 $lg = New-Object System.Drawing.Drawing2D.LinearGradientBrush($gr, $c1, $c2, 0.0)
                 $e.Graphics.FillRectangle($lg, $gr)
                 $lg.Dispose()

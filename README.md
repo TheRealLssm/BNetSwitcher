@@ -108,23 +108,36 @@ Prebuilt PowerShell executables are frequently flagged as false positives by ant
 to trust a binary from a stranger, **build your own from source in about ten seconds**:
 
 ```powershell
-git clone https://github.com/YOUR_USERNAME/YOUR_REPO.git
-cd YOUR_REPO
-.\build.ps1
+git clone https://github.com/TheRealLssm/BNetSwitcher.git
+cd BNetSwitcher
+.\build.cmd
 ```
 
-`build.ps1` installs the `ps2exe` module if needed and produces `bnet-switcher.exe` next to the script.
+Or just double-click **`build.cmd`** in the folder. It runs `build.ps1`, which installs the `ps2exe` module if
+needed and produces `bnet-switcher.exe` next to the script. No admin rights needed.
 
-If module installation fails, run this once and retry:
+> **"running scripts is disabled on this system"?** That's Windows' default PowerShell execution policy, and it's
+> why `build.cmd` exists: it runs the build with `-ExecutionPolicy Bypass` for that one run only, without changing
+> any system setting. If you'd rather call the `.ps1` yourself, allow scripts for the current window only:
+>
+> ```powershell
+> Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+> .\build.ps1
+> ```
+>
+> Downloaded the repo as a ZIP instead of cloning? Windows marks those files as "from the internet". Unblock
+> them once from inside the folder: `Get-ChildItem -Recurse | Unblock-File`
+
+If module installation still fails, run this once and retry:
 
 ```powershell
+[Net.ServicePointManager]::SecurityProtocol = 'Tls12'
 Install-Module ps2exe -Scope CurrentUser -Force
 ```
 
 ### No build required
 
-You can skip the EXE entirely and run the script directly — right-click `bnet-switcher-gui.ps1` →
-**Run with PowerShell**, or make a shortcut to:
+You can skip the EXE entirely and run the script directly — double-click **`run.cmd`**, or make a shortcut to:
 
 ```
 powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File "C:\path\to\bnet-switcher-gui.ps1"
@@ -155,6 +168,7 @@ Keep `bnet-switcher.ico` beside the script if you want the window icon.
 | `%APPDATA%\BNetSwitcher\playericons\` | Cached avatar and namecard images |
 | `%APPDATA%\BNetSwitcher\profiles\` | Saved Overwatch settings profiles |
 | `%APPDATA%\BNetSwitcher\removed-accounts.json` | Recovery log of removed accounts |
+| `%APPDATA%\BNetSwitcher\network.log` | Every outbound request: time, host, resolved IP, result (capped at ~1 MB) |
 | `Documents\Overwatch\Settings\Settings_v0.ini` | Read when saving a profile; written when applying one (backed up first) |
 
 Nothing is written inside the repo folder, so your account data can never end up in a commit.
@@ -165,9 +179,18 @@ Nothing is written inside the repo folder, so your account data can never end up
 
 - **No passwords, ever.** The app never reads, stores, or transmits credentials. Battle.net handles all authentication.
 - **No telemetry.** No analytics, no tracking, no phone-home.
-- **Two network calls only**, and only for accounts where *you* entered a BattleTag:
+- **Two kinds of network call only**, and only for accounts where *you* entered a BattleTag:
   1. `overfast-api.tekrop.fr` — public rank lookup
-  2. `static.playoverwatch.com` — Blizzard's CDN, for rank badge images
+  2. Blizzard's image hosts (`*.playoverwatch.com`, `d15f34w2p8l1cc.cloudfront.net`, `*.blizzard.com`) —
+     rank badges, avatars and namecards
+- **Image links are locked down.** The image addresses come from the API's response, so the app only follows
+  `https://` links to Blizzard's image hosts above, and refuses files over 5 MB. Anything else is skipped and
+  written to the network log as `BLOCKED`, so a bad or tampered response can't send your PC somewhere else.
+- **Network log.** Every request is logged to `network.log` with the IP it resolved to (Settings →
+  *Open network log*). If you see an unfamiliar IP in `netstat` or a firewall prompt, check the log: if it
+  isn't there, it didn't come from this app.
+- **Offline mode.** Settings → *Offline mode* turns off rank lookups, tag validation and image downloads.
+  The app then makes no network calls at all and just switches accounts.
 - **Backups before every config write.**
 - **Open source.** It's plain PowerShell — read exactly what it does before you run it.
 
@@ -188,7 +211,17 @@ That said, it is an unofficial community tool: use it at your own risk.
 **Ranks show "Not found"** — check the BattleTag format (`Name#1234`, case-sensitive). A profile that has never
 played competitive Overwatch, or a private profile, will also return not-found. This says nothing about ban status.
 
-**Ranks show "Rate limited"** — the public API has rate limits. Wait a minute and press `F5`.
+**Ranks show "Rate limited" or "Timeout"** — the public API has rate limits, and a profile it hasn't cached yet
+can be slow. The app already retries twice with a short wait before giving up, so if you still see this, wait a
+minute and press `F5`.
+
+**No banner behind an account** — expected for most accounts. Blizzard stopped listing banners (namecards) in the
+player search the rank service relies on, so it usually has none to send. The row gets a plain accent wash instead;
+hover the account name to confirm the reason.
+
+**A rank shows but its icon doesn't** — hover the rank cell. It says exactly why: the download failed (with the
+error), the server sent something that isn't a picture, or the link was blocked as not coming from Blizzard.
+`network.log` (Settings → *Open network log*) has the full request history.
 
 **A removed account came back** — Battle.net was running and rewrote its config on exit. Close Battle.net, then remove again.
 
