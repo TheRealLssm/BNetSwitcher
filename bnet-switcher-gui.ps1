@@ -1,5 +1,5 @@
 #======================================================================
-# Battle.net Account Switcher - Dark Edition (v1.3)
+# Battle.net Account Switcher - Dark Edition (v1.4)
 # Based on BNetSwitcher by Nepero (https://github.com/Nepero27182/BNetSwitcher)
 #
 # SECURITY & PRIVACY NOTICE
@@ -2893,7 +2893,7 @@ function Show-SettingsDialog {
 
     # Credit to the original project this is forked from
     $lblCredit = New-Object System.Windows.Forms.Label
-    $lblCredit.Text = "Dark Edition v1.3  -  forked from BNetSwitcher by Nepero" + [Environment]::NewLine + "Rank data by OverFast API"
+    $lblCredit.Text = "Dark Edition v1.4  -  forked from BNetSwitcher by Nepero" + [Environment]::NewLine + "Rank data by OverFast API"
     $lblCredit.Location = New-Object System.Drawing.Point($x, $y)
     $lblCredit.Size = New-Object System.Drawing.Size($w, 34)
     $lblCredit.TextAlign = 'MiddleCenter'

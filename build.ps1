@@ -15,7 +15,7 @@ param(
     [string]$SourceScript = "bnet-switcher-gui.ps1",
     [string]$OutputExe = "bnet-switcher.exe",
     [string]$IconPath = "bnet-switcher.ico",
-    [string]$Version = "1.3.0.0"
+    [string]$Version = "1.4.0.0"
 )
 
 $ScriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
