@@ -211,7 +211,17 @@ That said, it is an unofficial community tool: use it at your own risk.
 **Ranks show "Not found"** — check the BattleTag format (`Name#1234`, case-sensitive). A profile that has never
 played competitive Overwatch, or a private profile, will also return not-found. This says nothing about ban status.
 
-**Ranks show "Rate limited"** — the public API has rate limits. Wait a minute and press `F5`.
+**Ranks show "Rate limited" or "Timeout"** — the public API has rate limits, and a profile it hasn't cached yet
+can be slow. The app already retries twice with a short wait before giving up, so if you still see this, wait a
+minute and press `F5`.
+
+**No banner behind an account** — expected for most accounts. Blizzard stopped listing banners (namecards) in the
+player search the rank service relies on, so it usually has none to send. The row gets a plain accent wash instead;
+hover the account name to confirm the reason.
+
+**A rank shows but its icon doesn't** — hover the rank cell. It says exactly why: the download failed (with the
+error), the server sent something that isn't a picture, or the link was blocked as not coming from Blizzard.
+`network.log` (Settings → *Open network log*) has the full request history.
 
 **A removed account came back** — Battle.net was running and rewrote its config on exit. Close Battle.net, then remove again.
 
