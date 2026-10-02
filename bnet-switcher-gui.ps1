@@ -1,5 +1,5 @@
 #======================================================================
-# Battle.net Account Switcher - Dark Edition (v1.3)
+# Battle.net Account Switcher - Dark Edition (v1.4)
 # Based on BNetSwitcher by Nepero (https://github.com/Nepero27182/BNetSwitcher)
 #
 # SECURITY & PRIVACY NOTICE
@@ -87,6 +87,7 @@ $script:ProfileDir         = Join-Path $script:DataFolder 'profiles'
 $script:DebugLogPath       = Join-Path $script:DataFolder 'debug.log'
 $script:NetworkLogPath     = Join-Path $script:DataFolder 'network.log'
 $script:RemovedLogPath     = Join-Path $script:DataFolder 'removed-accounts.json'
+$script:LockPath           = Join-Path $script:DataFolder 'lock.json'
 
 try {
     foreach ($d in @($script:DataFolder, $script:IconCacheDir, $script:PlayerIconDir, $script:ProfileDir)) {
@@ -2192,6 +2193,436 @@ function Start-RankFetchForAccounts {
 }
 
 #--------------------------------------
+# APP LOCK
+#
+#   Optional password asked for before the app shows or does anything.
+#   The password and the secret answer are stored only as salted
+#   PBKDF2-SHA256 hashes in lock.json. Wrong attempts are counted in that
+#   file, so closing and reopening the app does not reset the wait.
+#
+#   This keeps other people at this PC out of the app. It does not encrypt
+#   anything: Battle.net's own config lists the account emails in plain
+#   text, and anyone who can edit this data folder can delete lock.json.
+#--------------------------------------
+$script:LockIterations = 210000
+$script:LockQuestions = @(
+    'What was the name of your first pet?',
+    'What city were you born in?',
+    'What was the name of your first school?',
+    "What is your mother's maiden name?",
+    'What was your childhood nickname?'
+)
+
+function Get-LockHash {
+    param([string]$Secret, [byte[]]$Salt, [int]$Iterations)
+    $kdf = [System.Security.Cryptography.Rfc2898DeriveBytes]::new($Secret, $Salt, $Iterations, [System.Security.Cryptography.HashAlgorithmName]::SHA256)
+    try { return , $kdf.GetBytes(32) } finally { $kdf.Dispose() }
+}
+
+function New-LockSecret {
+    param([string]$Secret)
+    $salt = New-Object byte[] 16
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($salt) } finally { $rng.Dispose() }
+    $hash = Get-LockHash $Secret $salt $script:LockIterations
+    return @{ Salt = [Convert]::ToBase64String($salt); Hash = [Convert]::ToBase64String($hash) }
+}
+
+# Constant-time comparison, so timing says nothing about how close a guess was
+function Test-LockSecret {
+    param([string]$Secret, [string]$Salt, [string]$Hash, [int]$Iterations)
+    try {
+        $expected = [Convert]::FromBase64String($Hash)
+        $actual = Get-LockHash $Secret ([Convert]::FromBase64String($Salt)) $Iterations
+    } catch { return $false }
+    if ($expected.Length -ne $actual.Length) { return $false }
+    $diff = 0
+    for ($i = 0; $i -lt $expected.Length; $i++) { $diff = $diff -bor ($expected[$i] -bxor $actual[$i]) }
+    return ($diff -eq 0)
+}
+
+# Answers ignore case and extra spaces: "Mr  Whiskers" matches "mr whiskers"
+function Format-LockAnswer {
+    param([string]$Answer)
+    return (($Answer.Trim() -replace '\s+', ' ').ToLowerInvariant())
+}
+
+function Get-AppLock {
+    if (-not (Test-Path $script:LockPath)) { return $null }
+    try {
+        $l = Get-Content $script:LockPath -Raw | ConvertFrom-Json
+        if ($l.Hash -and $l.Salt -and $l.AnswerHash -and $l.AnswerSalt) {
+            foreach ($p in @(@('FailCount', 0), @('LockedUntil', ''), @('AnswerIterations', [int]$l.Iterations))) {
+                if ($null -eq $l.PSObject.Properties[$p[0]]) { $l | Add-Member -NotePropertyName $p[0] -NotePropertyValue $p[1] }
+            }
+            return $l
+        }
+    } catch { }
+    return $null
+}
+
+function Write-AppLock {
+    param($Lock)
+    try { ($Lock | ConvertTo-Json) | Set-Content -Path $script:LockPath -Encoding UTF8; return $true } catch { return $false }
+}
+
+# $KeepAnswerFrom: an existing lock whose answer hash is reused when the
+# answer is left blank while changing the password
+function Save-AppLock {
+    param([string]$Password, [string]$Question, [string]$Answer, $KeepAnswerFrom = $null)
+    $p = New-LockSecret $Password
+    $lock = [pscustomobject][ordered]@{
+        Version = 1; Iterations = $script:LockIterations; Salt = $p.Salt; Hash = $p.Hash
+        Question = $Question; AnswerIterations = $script:LockIterations; AnswerSalt = ''; AnswerHash = ''
+        FailCount = 0; LockedUntil = ''
+    }
+    if ($KeepAnswerFrom) {
+        $lock.AnswerIterations = [int]$KeepAnswerFrom.AnswerIterations
+        $lock.AnswerSalt = [string]$KeepAnswerFrom.AnswerSalt
+        $lock.AnswerHash = [string]$KeepAnswerFrom.AnswerHash
+    } else {
+        $a = New-LockSecret (Format-LockAnswer $Answer)
+        $lock.AnswerSalt = $a.Salt; $lock.AnswerHash = $a.Hash
+    }
+    return (Write-AppLock $lock)
+}
+
+# Every 5th wrong attempt starts a wait: 30 s, then 1, 2, 4, 8, 16 min
+function Update-LockFailures {
+    param($Lock, [bool]$Success)
+    if ($Success) {
+        $Lock.FailCount = 0; $Lock.LockedUntil = ''
+    } else {
+        $Lock.FailCount = [int]$Lock.FailCount + 1
+        if ($Lock.FailCount % 5 -eq 0) {
+            $secs = 30 * [Math]::Pow(2, [Math]::Min(5, [int]($Lock.FailCount / 5) - 1))
+            $Lock.LockedUntil = (Get-Date).AddSeconds($secs).ToString('o')
+        }
+    }
+    [void](Write-AppLock $Lock)
+}
+
+function Get-LockWait {
+    param($Lock)
+    try {
+        if ($Lock.LockedUntil) {
+            $s = ([datetime]::Parse([string]$Lock.LockedUntil, $null, [System.Globalization.DateTimeStyles]::RoundtripKind) - (Get-Date)).TotalSeconds
+            # Longer than the longest wait means the clock was changed; do not lock forever
+            if ($s -gt 0 -and $s -le 1000) { return [int][Math]::Ceiling($s) }
+        }
+    } catch { }
+    return 0
+}
+
+function New-LockLabel {
+    param([string]$Text, [int]$X, [int]$Y, [int]$W, [int]$H, $Font, $Color)
+    $l = New-Object System.Windows.Forms.Label
+    $l.Text = $Text
+    $l.Location = New-Object System.Drawing.Point($X, $Y)
+    $l.Size = New-Object System.Drawing.Size($W, $H)
+    if ($Font) { $l.Font = $Font }
+    if ($Color) { $l.ForeColor = $Color }
+    return $l
+}
+
+function New-LockTextBox {
+    param([int]$X, [int]$Y, [int]$W, [bool]$Masked)
+    $t = New-Object System.Windows.Forms.TextBox
+    $t.Location = New-Object System.Drawing.Point($X, $Y)
+    $t.Size = New-Object System.Drawing.Size($W, 28)
+    $t.BackColor = $script:Colors.GridBack; $t.ForeColor = $script:Colors.Fore
+    $t.BorderStyle = 'FixedSingle'
+    $t.Font = New-Object System.Drawing.Font('Segoe UI', 11)
+    $t.UseSystemPasswordChar = $Masked
+    return $t
+}
+
+# Lock screen. Returns $true once the right password (or a reset through the
+# secret answer) is entered; $false if the user quits.
+function Show-UnlockDialog {
+    param($Lock)
+    $c = $script:Colors
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text = 'Battle.net Account Switcher'
+    $dlg.FormBorderStyle = 'FixedDialog'
+    $dlg.MaximizeBox = $false; $dlg.MinimizeBox = $false
+    $dlg.StartPosition = 'CenterScreen'
+    $dlg.ShowInTaskbar = $true
+    if ($script:Form.Icon) { $dlg.Icon = $script:Form.Icon }
+    $dlg.BackColor = $c.FormBack; $dlg.ForeColor = $c.Fore
+    $dlg.Font = New-Object System.Drawing.Font('Segoe UI', 10)
+    $dlg.Add_Shown({ Set-DarkTitleBar -TargetForm $this -Dark $script:Colors.IsDark; $this.Activate() })
+
+    $state = @{ Unlocked = $false }
+    $fHead = New-Object System.Drawing.Font('Segoe UI Semibold', 13)
+    $fSmall = New-Object System.Drawing.Font('Segoe UI', 9)
+
+    #-- Password view
+    $pUnlock = New-Object System.Windows.Forms.Panel
+    $pUnlock.Location = New-Object System.Drawing.Point(0, 0)
+    $pUnlock.Size = New-Object System.Drawing.Size(440, 246)
+    $pUnlock.Controls.Add((New-LockLabel 'This app is locked' 22 18 396 30 $fHead $c.Accent))
+    $pUnlock.Controls.Add((New-LockLabel 'Enter your password to see your accounts.' 22 52 396 22 $null $c.Subtle))
+    $txtPw = New-LockTextBox 22 82 396 $true
+    $pUnlock.Controls.Add($txtPw)
+    $lblErr = New-LockLabel '' 22 116 396 38 $fSmall $c.Danger
+    $pUnlock.Controls.Add($lblErr)
+    $btnUnlock = New-Object System.Windows.Forms.Button
+    $btnUnlock.Text = 'Unlock'
+    $btnUnlock.Location = New-Object System.Drawing.Point(22, 158)
+    $btnUnlock.Size = New-Object System.Drawing.Size(190, 36)
+    Style-Button $btnUnlock 'primary'
+    $pUnlock.Controls.Add($btnUnlock)
+    $btnQuit = New-Object System.Windows.Forms.Button
+    $btnQuit.Text = 'Quit'
+    $btnQuit.Location = New-Object System.Drawing.Point(228, 158)
+    $btnQuit.Size = New-Object System.Drawing.Size(190, 36)
+    Style-Button $btnQuit 'normal'
+    $btnQuit.DialogResult = 'Cancel'
+    $pUnlock.Controls.Add($btnQuit)
+    $btnForgot = New-Object System.Windows.Forms.Button
+    $btnForgot.Text = 'I forgot my password'
+    $btnForgot.Location = New-Object System.Drawing.Point(16, 206)
+    $btnForgot.Size = New-Object System.Drawing.Size(220, 28)
+    $btnForgot.FlatStyle = 'Flat'; $btnForgot.FlatAppearance.BorderSize = 0
+    $btnForgot.FlatAppearance.MouseOverBackColor = $c.FormBack; $btnForgot.FlatAppearance.MouseDownBackColor = $c.FormBack
+    $btnForgot.ForeColor = $c.Blue; $btnForgot.TextAlign = 'MiddleLeft'
+    $btnForgot.Font = New-Object System.Drawing.Font('Segoe UI', 9.5, [System.Drawing.FontStyle]::Underline)
+    $btnForgot.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $pUnlock.Controls.Add($btnForgot)
+    $dlg.Controls.Add($pUnlock)
+
+    #-- Forgot view: secret answer + new password
+    $pForgot = New-Object System.Windows.Forms.Panel
+    $pForgot.Location = New-Object System.Drawing.Point(0, 0)
+    $pForgot.Size = New-Object System.Drawing.Size(440, 372)
+    $pForgot.Visible = $false
+    $pForgot.Controls.Add((New-LockLabel 'Reset your password' 22 18 396 30 $fHead $c.Accent))
+    $pForgot.Controls.Add((New-LockLabel ([string]$Lock.Question) 22 52 396 40 $null $c.Fore))
+    $txtAns = New-LockTextBox 22 94 396 $false
+    $pForgot.Controls.Add($txtAns)
+    $pForgot.Controls.Add((New-LockLabel 'New password' 22 134 396 20 $fSmall $c.Subtle))
+    $txtNew = New-LockTextBox 22 156 396 $true
+    $pForgot.Controls.Add($txtNew)
+    $pForgot.Controls.Add((New-LockLabel 'Confirm new password' 22 194 396 20 $fSmall $c.Subtle))
+    $txtNew2 = New-LockTextBox 22 216 396 $true
+    $pForgot.Controls.Add($txtNew2)
+    $lblErr2 = New-LockLabel '' 22 252 396 38 $fSmall $c.Danger
+    $pForgot.Controls.Add($lblErr2)
+    $btnReset = New-Object System.Windows.Forms.Button
+    $btnReset.Text = 'Reset password'
+    $btnReset.Location = New-Object System.Drawing.Point(22, 296)
+    $btnReset.Size = New-Object System.Drawing.Size(190, 36)
+    Style-Button $btnReset 'primary'
+    $pForgot.Controls.Add($btnReset)
+    $btnBack = New-Object System.Windows.Forms.Button
+    $btnBack.Text = 'Back'
+    $btnBack.Location = New-Object System.Drawing.Point(228, 296)
+    $btnBack.Size = New-Object System.Drawing.Size(190, 36)
+    Style-Button $btnBack 'normal'
+    $pForgot.Controls.Add($btnBack)
+    $dlg.Controls.Add($pForgot)
+
+    function Show-LockView {
+        param([bool]$Forgot)
+        $pUnlock.Visible = -not $Forgot
+        $pForgot.Visible = $Forgot
+        if ($Forgot) {
+            $dlg.ClientSize = New-Object System.Drawing.Size(440, 352)
+            $dlg.AcceptButton = $btnReset; $dlg.CancelButton = $btnBack
+            $txtAns.Focus() | Out-Null
+        } else {
+            $dlg.ClientSize = New-Object System.Drawing.Size(440, 246)
+            $dlg.AcceptButton = $btnUnlock; $dlg.CancelButton = $btnQuit
+            $txtPw.Focus() | Out-Null
+        }
+        Update-LockWaitState
+    }
+
+    # Disables input while a wait is running and counts it down
+    function Update-LockWaitState {
+        $w = Get-LockWait $Lock
+        $free = ($w -eq 0)
+        foreach ($ctl in @($txtPw, $btnUnlock, $txtAns, $txtNew, $txtNew2, $btnReset)) { $ctl.Enabled = $free }
+        if (-not $free) {
+            $msg = "Too many wrong attempts. Try again in $w s."
+            $lblErr.Text = $msg; $lblErr2.Text = $msg
+        } elseif ($lblErr.Text -like 'Too many*') {
+            $lblErr.Text = ''; $lblErr2.Text = ''
+        }
+    }
+
+    $tick = New-Object System.Windows.Forms.Timer
+    $tick.Interval = 1000
+    $tick.Add_Tick({ Update-LockWaitState })
+    $tick.Start()
+
+    $btnForgot.Add_Click({ Show-LockView $true })
+    $btnBack.Add_Click({ Show-LockView $false })
+
+    $btnUnlock.Add_Click({
+        if ((Get-LockWait $Lock) -gt 0) { Update-LockWaitState; return }
+        $dlg.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+        $ok = Test-LockSecret $txtPw.Text ([string]$Lock.Salt) ([string]$Lock.Hash) ([int]$Lock.Iterations)
+        $dlg.Cursor = [System.Windows.Forms.Cursors]::Default
+        Update-LockFailures $Lock $ok
+        if ($ok) { $state.Unlocked = $true; $dlg.DialogResult = 'OK'; return }
+        $txtPw.SelectAll(); $txtPw.Focus() | Out-Null
+        $left = 5 - ([int]$Lock.FailCount % 5)
+        $lblErr.Text = "Wrong password. $left more tr$(if ($left -eq 1) { 'y' } else { 'ies' }) before a short wait."
+        Update-LockWaitState
+    })
+
+    $btnReset.Add_Click({
+        if ((Get-LockWait $Lock) -gt 0) { Update-LockWaitState; return }
+        if ($txtNew.Text.Length -lt 4) { $lblErr2.Text = 'The new password needs at least 4 characters.'; return }
+        if ($txtNew.Text -ne $txtNew2.Text) { $lblErr2.Text = "The new passwords don't match."; return }
+        $dlg.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+        $ok = Test-LockSecret (Format-LockAnswer $txtAns.Text) ([string]$Lock.AnswerSalt) ([string]$Lock.AnswerHash) ([int]$Lock.AnswerIterations)
+        $saved = $false
+        if ($ok) { $saved = Save-AppLock $txtNew.Text ([string]$Lock.Question) '' $Lock }
+        $dlg.Cursor = [System.Windows.Forms.Cursors]::Default
+        if ($saved) { $state.Unlocked = $true; $dlg.DialogResult = 'OK'; return }
+        if ($ok) { $lblErr2.Text = "Your answer is right, but the new password couldn't be saved to lock.json."; return }
+        Update-LockFailures $Lock $false
+        $left = 5 - ([int]$Lock.FailCount % 5)
+        $lblErr2.Text = "That answer isn't right. $left more tr$(if ($left -eq 1) { 'y' } else { 'ies' }) before a short wait."
+        Update-LockWaitState
+    })
+
+    Show-LockView $false
+    [void]$dlg.ShowDialog()
+    $tick.Stop(); $tick.Dispose()
+    $dlg.Dispose()
+    return [bool]$state.Unlocked
+}
+
+# Called before anything is loaded into the window
+$script:AppUnlocked = $false
+function Invoke-AppUnlock {
+    $lock = Get-AppLock
+    if (-not $lock) { $script:AppUnlocked = $true }
+    else { $script:AppUnlocked = [bool](Show-UnlockDialog $lock) }
+    return $script:AppUnlocked
+}
+
+# Settings > App password: set, change or remove
+function Show-PasswordSetupDialog {
+    param($Owner = $script:Form)
+    $c = $script:Colors
+    $lock = Get-AppLock
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text = 'App password'
+    $dlg.FormBorderStyle = 'FixedDialog'
+    $dlg.MaximizeBox = $false; $dlg.MinimizeBox = $false
+    $dlg.StartPosition = 'CenterParent'
+    $dlg.BackColor = $c.FormBack; $dlg.ForeColor = $c.Fore
+    $dlg.Font = New-Object System.Drawing.Font('Segoe UI', 10)
+    $dlg.Add_Shown({ Set-DarkTitleBar -TargetForm $this -Dark $script:Colors.IsDark })
+    $fSmall = New-Object System.Drawing.Font('Segoe UI', 9)
+
+    $head = 'Set an app password'
+    if ($lock) { $head = 'Change app password' }
+    $dlg.Controls.Add((New-LockLabel $head 22 18 436 30 (New-Object System.Drawing.Font('Segoe UI Semibold', 13)) $c.Accent))
+    $dlg.Controls.Add((New-LockLabel "The app will ask for this password before it shows your accounts or does anything. Your secret answer lets you reset it if you forget." 22 52 436 42 $fSmall $c.Subtle))
+    $y = 102
+
+    $txtCur = $null
+    if ($lock) {
+        $dlg.Controls.Add((New-LockLabel 'Current password' 22 $y 436 20 $fSmall $c.Subtle)); $y += 22
+        $txtCur = New-LockTextBox 22 $y 436 $true; $dlg.Controls.Add($txtCur); $y += 40
+    }
+    $dlg.Controls.Add((New-LockLabel 'New password' 22 $y 436 20 $fSmall $c.Subtle)); $y += 22
+    $txtNew = New-LockTextBox 22 $y 436 $true; $dlg.Controls.Add($txtNew); $y += 40
+    $dlg.Controls.Add((New-LockLabel 'Confirm new password' 22 $y 436 20 $fSmall $c.Subtle)); $y += 22
+    $txtNew2 = New-LockTextBox 22 $y 436 $true; $dlg.Controls.Add($txtNew2); $y += 40
+
+    $dlg.Controls.Add((New-LockLabel 'Secret question (pick one or type your own)' 22 $y 436 20 $fSmall $c.Subtle)); $y += 22
+    $cmbQ = New-Object System.Windows.Forms.ComboBox
+    $cmbQ.DropDownStyle = 'DropDown'
+    [void]$cmbQ.Items.AddRange($script:LockQuestions)
+    $cmbQ.Location = New-Object System.Drawing.Point(22, $y)
+    $cmbQ.Size = New-Object System.Drawing.Size(436, 28)
+    $cmbQ.FlatStyle = 'Flat'; $cmbQ.BackColor = $c.GridBack; $cmbQ.ForeColor = $c.Fore
+    if ($lock) { $cmbQ.Text = [string]$lock.Question } else { $cmbQ.SelectedIndex = 0 }
+    $dlg.Controls.Add($cmbQ); $y += 40
+
+    $ansHint = 'Answer'
+    if ($lock) { $ansHint = 'Answer (leave blank to keep your current answer)' }
+    $dlg.Controls.Add((New-LockLabel $ansHint 22 $y 436 20 $fSmall $c.Subtle)); $y += 22
+    $txtAns = New-LockTextBox 22 $y 436 $false; $dlg.Controls.Add($txtAns); $y += 44
+
+    $dlg.Controls.Add((New-LockLabel ("This keeps other people at this PC out of the app. It doesn't encrypt anything: Battle.net's own config still lists your account emails. " +
+        "Forgot the password and the answer? Delete lock.json in %APPDATA%\BNetSwitcher.") 22 $y 436 56 (New-Object System.Drawing.Font('Segoe UI', 8.5)) $c.Subtle))
+    $y += 60
+    $lblErr = New-LockLabel '' 22 $y 436 36 $fSmall $c.Danger
+    $dlg.Controls.Add($lblErr); $y += 40
+
+    $btnSave = New-Object System.Windows.Forms.Button
+    $btnSave.Text = 'Save password'
+    $btnSave.Location = New-Object System.Drawing.Point(22, $y)
+    $btnSave.Size = New-Object System.Drawing.Size(140, 36)
+    Style-Button $btnSave 'primary'
+    $dlg.Controls.Add($btnSave)
+
+    $btnRemove = New-Object System.Windows.Forms.Button
+    $btnRemove.Text = 'Remove password'
+    $btnRemove.Location = New-Object System.Drawing.Point(170, $y)
+    $btnRemove.Size = New-Object System.Drawing.Size(150, 36)
+    Style-Button $btnRemove 'danger'
+    $btnRemove.Visible = [bool]$lock
+    $dlg.Controls.Add($btnRemove)
+
+    $btnCancel = New-Object System.Windows.Forms.Button
+    $btnCancel.Text = 'Cancel'
+    $btnCancel.Location = New-Object System.Drawing.Point(328, $y)
+    $btnCancel.Size = New-Object System.Drawing.Size(130, 36)
+    Style-Button $btnCancel 'normal'
+    $btnCancel.DialogResult = 'Cancel'
+    $dlg.Controls.Add($btnCancel)
+    $dlg.AcceptButton = $btnSave; $dlg.CancelButton = $btnCancel
+    $dlg.ClientSize = New-Object System.Drawing.Size(480, ($y + 36 + 20))
+
+    $result = @{ Action = '' }
+    function Test-CurrentPassword {
+        if (-not $lock) { return $true }
+        $dlg.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+        $ok = Test-LockSecret $txtCur.Text ([string]$lock.Salt) ([string]$lock.Hash) ([int]$lock.Iterations)
+        $dlg.Cursor = [System.Windows.Forms.Cursors]::Default
+        if (-not $ok) { $lblErr.Text = 'The current password is wrong.' }
+        return $ok
+    }
+
+    $btnSave.Add_Click({
+        if ($txtNew.Text.Length -lt 4) { $lblErr.Text = 'The new password needs at least 4 characters.'; return }
+        if ($txtNew.Text -ne $txtNew2.Text) { $lblErr.Text = "The new passwords don't match."; return }
+        $q = $cmbQ.Text.Trim()
+        if ($q.Length -lt 5) { $lblErr.Text = 'Pick a secret question or type your own.'; return }
+        $keep = $null
+        if ((Format-LockAnswer $txtAns.Text).Length -lt 2) {
+            if ($lock -and $q -eq [string]$lock.Question) { $keep = $lock }
+            else { $lblErr.Text = 'Type an answer to the secret question (2 characters or more).'; return }
+        }
+        if (-not (Test-CurrentPassword)) { return }
+        if (-not (Save-AppLock $txtNew.Text $q $txtAns.Text $keep)) { $lblErr.Text = "Couldn't save lock.json in the data folder."; return }
+        $result.Action = 'saved'
+        $dlg.DialogResult = 'OK'
+    })
+
+    $btnRemove.Add_Click({
+        if (-not (Test-CurrentPassword)) { return }
+        try { Remove-Item -LiteralPath $script:LockPath -Force -ErrorAction Stop } catch { $lblErr.Text = "Couldn't delete lock.json: $_"; return }
+        $result.Action = 'removed'
+        $dlg.DialogResult = 'OK'
+    })
+
+    [void]$dlg.ShowDialog($Owner)
+    $dlg.Dispose()
+    if ($result.Action -eq 'saved')   { Set-Status 'App password saved - it will be asked for next time the app starts' }
+    if ($result.Action -eq 'removed') { Set-Status 'App password removed' }
+}
+
+#--------------------------------------
 # SWITCH LOGIC
 #--------------------------------------
 function Confirm-FlaggedSwitch {
@@ -2416,7 +2847,7 @@ function Show-SettingsDialog {
     $btnNetLog = New-Object System.Windows.Forms.Button
     $btnNetLog.Text = 'Open network log'
     $btnNetLog.Location = New-Object System.Drawing.Point($x, $y)
-    $btnNetLog.Size = New-Object System.Drawing.Size(380, 32)
+    $btnNetLog.Size = New-Object System.Drawing.Size(180, 32)
     Style-Button $btnNetLog 'normal'
     $btnNetLog.Add_Click({
         if (Test-Path $script:NetworkLogPath) {
@@ -2426,6 +2857,18 @@ function Show-SettingsDialog {
         }
     })
     $dlg.Controls.Add($btnNetLog)
+
+    $btnLock = New-Object System.Windows.Forms.Button
+    $btnLock.Text = 'App password...'
+    if (Get-AppLock) { $btnLock.Text = 'Change app password...' }
+    $btnLock.Location = New-Object System.Drawing.Point(($x + 200), $y)
+    $btnLock.Size = New-Object System.Drawing.Size(180, 32)
+    Style-Button $btnLock 'normal'
+    $btnLock.Add_Click({
+        Show-PasswordSetupDialog -Owner $dlg
+        if (Get-AppLock) { $btnLock.Text = 'Change app password...' } else { $btnLock.Text = 'App password...' }
+    })
+    $dlg.Controls.Add($btnLock)
     $y += 48
 
     $btnSave = New-Object System.Windows.Forms.Button
@@ -2450,7 +2893,7 @@ function Show-SettingsDialog {
 
     # Credit to the original project this is forked from
     $lblCredit = New-Object System.Windows.Forms.Label
-    $lblCredit.Text = "Dark Edition v1.3  -  forked from BNetSwitcher by Nepero" + [Environment]::NewLine + "Rank data by OverFast API"
+    $lblCredit.Text = "Dark Edition v1.4  -  forked from BNetSwitcher by Nepero" + [Environment]::NewLine + "Rank data by OverFast API"
     $lblCredit.Location = New-Object System.Drawing.Point($x, $y)
     $lblCredit.Size = New-Object System.Drawing.Size($w, 34)
     $lblCredit.TextAlign = 'MiddleCenter'
@@ -2880,6 +3323,7 @@ if ($env:BNS_SMOKETEST) {
     $script:SmokeTimer.Interval = 12000
     $script:SmokeTimer.Add_Tick({
         $script:SmokeTimer.Stop()
+        if (-not $script:AppUnlocked) { return }   # still on the lock screen: dump nothing
         try {
             if ($env:BNS_SMOKE_REMOVE) {
                 $script:Settings.ConfirmRemoval = $false
@@ -2933,6 +3377,8 @@ if ($env:BNS_SMOKETEST) {
 # LAUNCH
 #--------------------------------------
 Apply-Theme
+# App lock first: no rows, emails, lookups or switching until it is passed
+if (-not (Invoke-AppUnlock)) { exit }
 Reload-AccountRows
 Set-Status 'Ready'
 $null = $script:Form.ShowDialog()

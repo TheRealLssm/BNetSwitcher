@@ -1,31 +1,27 @@
-# Battle.net Account Switcher — Dark Edition v1.3.0
+# Battle.net Account Switcher — Dark Edition v1.4.0
 
 Fork of [BNetSwitcher by Nepero27182](https://github.com/Nepero27182/BNetSwitcher),
 rewritten with a working Overwatch 2 rank lookup, account management, and an Overwatch-themed UI.
 
-## What's new in 1.3.0
+## What's new in 1.4.0
 
-**Entering BattleTags is now hard to miss**
-- A popup on startup asks for every account that has no BattleTag yet, one box per account. Tags missing the
-  `#` and digits are highlighted before anything is saved, and the account you're signed in to is marked.
-  Tick *Don't ask* to stop it; Settings → *Ask for missing BattleTags on startup* brings it back, and
-  right-click → *Enter missing BattleTags* opens it any time.
-- Empty BattleTag cells are drawn as a dashed orange **+ Add BattleTag** box. One click starts typing,
-  with a `Name#1234` hint.
-- The popup explains the one-time sign-in per account: the first switch may ask for a password, and ticking
-  *Keep me logged in* lets Battle.net remember it.
+**Optional app password**
+- Settings → **App password** sets a password the app asks for before it does anything. Until it's entered
+  there's only a lock screen: no account list, no emails, no rank lookups, no switching. *Quit* closes the app.
+- **I forgot my password** asks a secret question you chose (first pet, birth city, or your own) and lets you
+  set a new password with the right answer. Capitals and extra spaces in the answer don't matter.
+- The password and answer are stored only as salted PBKDF2-SHA256 hashes in `lock.json`, never as text.
+- After every 5 wrong tries the app makes you wait: 30 seconds, doubling up to 16 minutes. Closing and
+  reopening the app doesn't reset the count.
+- Changing or removing the password needs the current one.
 
-**Network safety**
-- Image links from the rank API are only followed when they are `https://` and point at Blizzard's image hosts;
-  anything else is skipped and logged as `BLOCKED`. Downloads over 5 MB are discarded.
-- Every outbound request is written to `network.log` with the host, the IP it resolved to and the result
-  (Settings → *Open network log*).
-- **Offline mode** turns off rank lookups, tag validation and image downloads, so the app makes no network calls.
+**What it does and doesn't protect.** The lock keeps other people at your PC out of the app. It doesn't encrypt
+anything: Battle.net's own config file lists your account emails in plain text, and anyone who can open
+`%APPDATA%\BNetSwitcher` can delete `lock.json` to remove the lock. That's also the way back in if you forget
+both the password and the answer.
 
-**Reliability**
-- Missing rank icons, avatars and banners now say why on hover instead of showing an unexplained blank.
-- Rank lookups retry when the rank service is busy (429/503/timeout) and run 3 at a time to stay under its limit.
-- `build.cmd` / `run.cmd` let a fresh clone build and run without changing Windows' script policy.
+See [v1.3.0](https://github.com/TheRealLssm/BNetSwitcher/releases/tag/v1.3.0) for the BattleTag prompt,
+network log, offline mode and image host allowlist.
 
 ## ⚠️ Read this before downloading the EXE
 
@@ -54,7 +50,7 @@ this download as much as to anyone else's.
 SHA-256 of `bnet-switcher.exe`:
 
 ```
-2A117B2651A362C739291AD48ACFE3404B8C48C62DAC2ECB1D679B3224580625
+16EF9F69DE2BCBA5C55AEB487A8F9A8391C65CA5791A618A249B7FF75C7CB000
 ```
 
 Check it before running:
@@ -95,6 +91,7 @@ If the hash does not match exactly, do not run the file.
 
 **Interface**
 - Overwatch-themed dark mode with a proper dark title bar; light and auto modes available
+- Optional app password with a secret-question reset
 - Streamer mode masks account emails
 - Resizable window, context menu, `F5` to refresh, `Del` to remove
 
@@ -116,6 +113,9 @@ Your account data stays in `%APPDATA%\BNetSwitcher`.
 
 Malware on a PC can still go after Battle.net's own saved sign-ins, so turn on the
 **Blizzard Authenticator** for every account.
+
+The optional app password is stored only as a salted hash in `lock.json`. It keeps people at your PC out of the
+app, but it doesn't encrypt your files.
 
 ## Known limitations
 
