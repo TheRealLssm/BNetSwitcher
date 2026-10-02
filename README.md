@@ -108,23 +108,36 @@ Prebuilt PowerShell executables are frequently flagged as false positives by ant
 to trust a binary from a stranger, **build your own from source in about ten seconds**:
 
 ```powershell
-git clone https://github.com/YOUR_USERNAME/YOUR_REPO.git
-cd YOUR_REPO
-.\build.ps1
+git clone https://github.com/TheRealLssm/BNetSwitcher.git
+cd BNetSwitcher
+.\build.cmd
 ```
 
-`build.ps1` installs the `ps2exe` module if needed and produces `bnet-switcher.exe` next to the script.
+Or just double-click **`build.cmd`** in the folder. It runs `build.ps1`, which installs the `ps2exe` module if
+needed and produces `bnet-switcher.exe` next to the script. No admin rights needed.
 
-If module installation fails, run this once and retry:
+> **"running scripts is disabled on this system"?** That's Windows' default PowerShell execution policy, and it's
+> why `build.cmd` exists: it runs the build with `-ExecutionPolicy Bypass` for that one run only, without changing
+> any system setting. If you'd rather call the `.ps1` yourself, allow scripts for the current window only:
+>
+> ```powershell
+> Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+> .\build.ps1
+> ```
+>
+> Downloaded the repo as a ZIP instead of cloning? Windows marks those files as "from the internet". Unblock
+> them once from inside the folder: `Get-ChildItem -Recurse | Unblock-File`
+
+If module installation still fails, run this once and retry:
 
 ```powershell
+[Net.ServicePointManager]::SecurityProtocol = 'Tls12'
 Install-Module ps2exe -Scope CurrentUser -Force
 ```
 
 ### No build required
 
-You can skip the EXE entirely and run the script directly — right-click `bnet-switcher-gui.ps1` →
-**Run with PowerShell**, or make a shortcut to:
+You can skip the EXE entirely and run the script directly — double-click **`run.cmd`**, or make a shortcut to:
 
 ```
 powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File "C:\path\to\bnet-switcher-gui.ps1"
