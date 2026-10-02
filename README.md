@@ -180,6 +180,7 @@ Keep `bnet-switcher.ico` beside the script if you want the window icon.
 | `%APPDATA%\BNetSwitcher\profiles\` | Saved Overwatch settings profiles |
 | `%APPDATA%\BNetSwitcher\removed-accounts.json` | Recovery log of removed accounts |
 | `%APPDATA%\BNetSwitcher\network.log` | Every outbound request: time, host, resolved IP, result (capped at ~1 MB) |
+| `%APPDATA%\BNetSwitcher\lock.json` | App password and secret answer, as salted PBKDF2 hashes only (if a password is set) |
 | `Documents\Overwatch\Settings\Settings_v0.ini` | Read when saving a profile; written when applying one (backed up first) |
 
 Nothing is written inside the repo folder, so your account data can never end up in a commit.
@@ -205,6 +206,13 @@ Nothing is written inside the repo folder, so your account data can never end up
   isn't there, it didn't come from this app.
 - **Offline mode.** Settings → *Offline mode* turns off rank lookups, tag validation and image downloads.
   The app then makes no network calls at all and just switches accounts.
+- **App password (optional).** Settings → *App password* sets a password the app asks for before it shows any
+  account or does anything. *I forgot my password* resets it with the answer to a secret question you pick.
+  Both are stored only as salted PBKDF2-SHA256 hashes in `lock.json`. After every 5 wrong tries the app makes you
+  wait (30 s, doubling each time), and closing it doesn't reset the count.
+  This keeps other people at your PC out of the app; it does not encrypt anything. Battle.net's own config still
+  lists your account emails in plain text, and anyone who can edit `%APPDATA%\BNetSwitcher` can delete `lock.json`,
+  which is also the way back in if you forget both the password and the answer.
 - **Backups before every config write.**
 - **Open source.** It's plain PowerShell — read exactly what it does before you run it.
 
