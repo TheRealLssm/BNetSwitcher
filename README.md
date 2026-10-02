@@ -38,6 +38,15 @@ The original tool worked, but the rank column never populated. Three separate bu
 > You enter each account's BattleTag once (`Name#1234`). Battle.net only stores emails, and a BattleTag
 > cannot be derived from an email locally — so a one-time entry per account is unavoidable.
 
+### Entering BattleTags
+- **On startup**, a popup lists every account that has no BattleTag yet, with a box for each. Malformed tags
+  (missing the `#` and digits) are highlighted before anything is saved. The account you're signed in to is
+  marked, so you can copy its tag straight from Battle.net. Tick *Don't ask* to stop the popup; Settings →
+  *Ask for missing BattleTags on startup* turns it back on, and right-click → *Enter missing BattleTags* opens it any time.
+- **In the grid**, an empty BattleTag cell is drawn as a dashed orange **+ Add BattleTag** box. One click starts
+  typing; press Enter or click away to save.
+- The popup also explains the one-time sign-in per account (see [Requirements](#requirements)).
+
 ### BattleTag import / export
 Right-click any row → **Import / export BattleTags** (also in Settings).
 
@@ -151,7 +160,9 @@ Keep `bnet-switcher.ico` beside the script if you want the window icon.
 
 - Windows 10 or later
 - PowerShell 5.1 (ships with Windows) or newer
-- Battle.net installed, and each account logged into at least once so it appears in the saved list
+- Battle.net installed, and each account logged into at least once so it appears in the saved list.
+  The first switch to an account may ask for its password again; tick **Keep me logged in** and Battle.net
+  saves its own sign-in, so later switches skip the password.
 - Internet connection for rank lookups only — switching works fully offline
 
 ---
@@ -178,6 +189,9 @@ Nothing is written inside the repo folder, so your account data can never end up
 ## Privacy & safety
 
 - **No passwords, ever.** The app never reads, stores, or transmits credentials. Battle.net handles all authentication.
+- **No sign-in tokens either.** Battle.net keeps its own encrypted sign-in for each account; this app never reads,
+  copies or sends it. There is nothing in the app's data for a token stealer to take. Malware on a PC can still go
+  after Battle.net's own saved sign-ins, so turn on the **Blizzard Authenticator** for every account.
 - **No telemetry.** No analytics, no tracking, no phone-home.
 - **Two kinds of network call only**, and only for accounts where *you* entered a BattleTag:
   1. `overfast-api.tekrop.fr` — public rank lookup

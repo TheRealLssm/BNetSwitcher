@@ -1,5 +1,5 @@
 #======================================================================
-# Battle.net Account Switcher - Dark Edition (v1.2)
+# Battle.net Account Switcher - Dark Edition (v1.3)
 # Based on BNetSwitcher by Nepero (https://github.com/Nepero27182/BNetSwitcher)
 #
 # SECURITY & PRIVACY NOTICE
@@ -42,9 +42,17 @@ namespace BNS {
     public static class Native {
         [DllImport("dwmapi.dll", PreserveSig = true)]
         public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        public static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, string lParam);
     }
 }
 "@
+}
+
+# Grey hint text shown in an empty text box (EM_SETCUEBANNER)
+function Set-CueBanner {
+    param([System.Windows.Forms.TextBox]$Box, [string]$Text)
+    try { [void][BNS.Native]::SendMessage($Box.Handle, 0x1501, [IntPtr]1, $Text) } catch { }
 }
 
 function Set-DarkTitleBar {
@@ -114,6 +122,7 @@ $script:DefaultSettings = @{
     DebugLogging           = $false
     LogNetworkActivity     = $true
     OfflineMode            = $false
+    PromptForMissingTags   = $true
     WarnOnFlagged          = $true
     ConfirmRemoval         = $true
     WindowWidth            = 0
@@ -996,9 +1005,9 @@ $script:Grid.Columns['Status'].ReadOnly    = $true
 $script:Grid.Columns['BattleTag'].ReadOnly = $false
 foreach ($col in $script:RoleColumns) { $script:Grid.Columns[$col].ReadOnly = $true }
 
-$script:Grid.Columns['Account'].FillWeight   = 31
+$script:Grid.Columns['Account'].FillWeight   = 29
 $script:Grid.Columns['Status'].FillWeight    = 12
-$script:Grid.Columns['BattleTag'].FillWeight = 16
+$script:Grid.Columns['BattleTag'].FillWeight = 18
 $script:Grid.Columns['Tank'].FillWeight      = 10
 $script:Grid.Columns['DPS'].FillWeight       = 10
 $script:Grid.Columns['Support'].FillWeight   = 10
@@ -1199,6 +1208,8 @@ function Show-ThemedConfirm {
 # ROW MANAGEMENT
 #--------------------------------------
 $script:SuppressCellEvents = $false
+$script:AddTagTip = "Click here and type this account's BattleTag (like Name#1234), then press Enter." + [Environment]::NewLine +
+                    "Ranks and icons load automatically once it's saved."
 
 function Reload-AccountRows {
     $script:SuppressCellEvents = $true
@@ -1229,6 +1240,9 @@ function Reload-AccountRows {
         $tip = 'Status is set by you (right-click > Set status). Nothing is auto-detected.'
         if (-not [string]::IsNullOrWhiteSpace([string]$meta.Note)) { $tip = "Note: $($meta.Note)`n$tip" }
         $row.Cells['Status'].ToolTipText = $tip
+        if ([string]::IsNullOrWhiteSpace([string]$meta.BattleTag)) {
+            $row.Cells['BattleTag'].ToolTipText = $script:AddTagTip
+        }
         $i++
     }
     if ($script:Grid.Rows.Count -gt 0) { $script:Grid.Rows[0].Selected = $true }
@@ -1976,6 +1990,208 @@ function Show-ImportDialog {
 }
 
 #--------------------------------------
+# MISSING BATTLETAG PROMPT
+#
+#   Without a BattleTag an account gets no ranks or icons, and the empty
+#   grid cell was easy to miss. This asks for every missing tag in one
+#   place. It saves the tags and updates the rows in place; callers decide
+#   what to fetch, so nothing is looked up twice.
+#--------------------------------------
+function Show-MissingTagsDialog {
+    param([bool]$AtStartup = $false)
+    $missing = @($script:Accounts | Where-Object { [string]::IsNullOrWhiteSpace([string](Get-AccountMeta $_).BattleTag) })
+    if ($missing.Count -eq 0) {
+        if (-not $AtStartup) {
+            [System.Windows.Forms.MessageBox]::Show('Every account already has a BattleTag. Click a BattleTag cell to change one.',
+                'BattleTags', 'OK', 'Information') | Out-Null
+        }
+        return @()
+    }
+
+    $c = $script:Colors
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text = 'Enter your BattleTags'
+    $dlg.FormBorderStyle = 'FixedDialog'
+    $dlg.MaximizeBox = $false; $dlg.MinimizeBox = $false
+    $dlg.StartPosition = 'CenterParent'
+    $dlg.BackColor = $c.FormBack; $dlg.ForeColor = $c.Fore
+    $dlg.Font = New-Object System.Drawing.Font('Segoe UI', 10)
+    $dlg.Add_Shown({ Set-DarkTitleBar -TargetForm $this -Dark $script:Colors.IsDark })
+
+    $lblHead = New-Object System.Windows.Forms.Label
+    $lblHead.Text = 'Enter your BattleTag'
+    if ($missing.Count -gt 1) { $lblHead.Text = 'Enter your BattleTags' }
+    $lblHead.Location = New-Object System.Drawing.Point(22, 18)
+    $lblHead.Size = New-Object System.Drawing.Size(536, 30)
+    $lblHead.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 13)
+    $lblHead.ForeColor = $c.Accent
+    $dlg.Controls.Add($lblHead)
+
+    $lblBody = New-Object System.Windows.Forms.Label
+    $lblBody.Text = "Ranks and player icons only load for accounts that have a BattleTag. Battle.net doesn't keep it on your PC, so type it in once here." + [Environment]::NewLine +
+                    "Find it in the Battle.net app: click your name at the top right. Include the # and the numbers."
+    $lblBody.Location = New-Object System.Drawing.Point(22, 54)
+    $lblBody.Size = New-Object System.Drawing.Size(536, 66)
+    $lblBody.Font = New-Object System.Drawing.Font('Segoe UI', 9.75)
+    $lblBody.ForeColor = $c.Subtle
+    $dlg.Controls.Add($lblBody)
+
+    # One row per account; scrolls past six
+    $rowH = 40
+    $panel = New-Object System.Windows.Forms.Panel
+    $panel.Location = New-Object System.Drawing.Point(22, 128)
+    $panel.Size = New-Object System.Drawing.Size(536, ([Math]::Min($missing.Count, 6) * $rowH + 2))
+    $panel.AutoScroll = $true
+    $dlg.Controls.Add($panel)
+
+    $boxes = @{}
+    $ry = 0
+    foreach ($acct in $missing) {
+        $display = $acct
+        if ($script:Settings.StreamerMode) { $display = Mask-Account $acct }
+        if ($acct -eq $script:Accounts[0]) { $display += '  (signed in now)' }
+
+        $lbl = New-Object System.Windows.Forms.Label
+        $lbl.Text = $display
+        $lbl.Location = New-Object System.Drawing.Point(0, $ry)
+        $lbl.Size = New-Object System.Drawing.Size(272, 32)
+        $lbl.TextAlign = 'MiddleLeft'
+        $lbl.AutoEllipsis = $true
+        $panel.Controls.Add($lbl)
+
+        $tb = New-Object System.Windows.Forms.TextBox
+        $tb.Location = New-Object System.Drawing.Point(280, ($ry + 2))
+        $tb.Size = New-Object System.Drawing.Size(234, 28)
+        $tb.BackColor = $c.GridBack; $tb.ForeColor = $c.Fore
+        $tb.BorderStyle = 'FixedSingle'
+        $tb.Font = New-Object System.Drawing.Font('Segoe UI', 10.5)
+        $tb.Add_TextChanged({ $this.BackColor = $script:Colors.GridBack })
+        $panel.Controls.Add($tb)
+        Set-CueBanner $tb 'Name#1234'
+        $boxes[$acct] = $tb
+        $ry += $rowH
+    }
+
+    # Switching only reorders Battle.net's saved accounts; Battle.net asks for
+    # a password unless it holds its own saved sign-in for that account
+    $y = $panel.Bottom + 12
+    $lblOnceHead = New-Object System.Windows.Forms.Label
+    $lblOnceHead.Text = 'Sign in once per account'
+    $lblOnceHead.Location = New-Object System.Drawing.Point(22, $y)
+    $lblOnceHead.Size = New-Object System.Drawing.Size(536, 22)
+    $lblOnceHead.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 10)
+    $lblOnceHead.ForeColor = $c.Accent
+    $dlg.Controls.Add($lblOnceHead)
+    $y += 24
+
+    $lblOnce = New-Object System.Windows.Forms.Label
+    $lblOnce.Text = "The first time you switch to an account, Battle.net asks you to sign in again. Tick ""Keep me logged in"" and Battle.net saves an encrypted sign-in token on this PC, so later switches skip the password." + [Environment]::NewLine +
+                    "Only Battle.net uses that token. This app never reads, stores or sends it, or your password. Malware can still steal saved sign-ins, so turn on the Blizzard Authenticator for every account."
+    $lblOnce.Location = New-Object System.Drawing.Point(22, $y)
+    $lblOnce.Size = New-Object System.Drawing.Size(536, 90)
+    $lblOnce.Font = New-Object System.Drawing.Font('Segoe UI', 9.25)
+    $lblOnce.ForeColor = $c.Fore
+    $dlg.Controls.Add($lblOnce)
+
+    $y = $lblOnce.Bottom + 4
+    $lblErr = New-Object System.Windows.Forms.Label
+    $lblErr.Location = New-Object System.Drawing.Point(22, $y)
+    $lblErr.Size = New-Object System.Drawing.Size(536, 20)
+    $lblErr.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+    $lblErr.ForeColor = $c.Danger
+    $dlg.Controls.Add($lblErr)
+    $y += 24
+
+    $cbNoAsk = New-Object System.Windows.Forms.CheckBox
+    $cbNoAsk.Text = "Don't ask when the app starts (change this in Settings)"
+    $cbNoAsk.Location = New-Object System.Drawing.Point(22, $y)
+    $cbNoAsk.Size = New-Object System.Drawing.Size(536, 24)
+    $cbNoAsk.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+    $cbNoAsk.ForeColor = $c.Subtle
+    $cbNoAsk.Checked = -not [bool]$script:Settings.PromptForMissingTags
+    $dlg.Controls.Add($cbNoAsk)
+    $y += 38
+
+    $btnSave = New-Object System.Windows.Forms.Button
+    $btnSave.Text = 'Save BattleTags'
+    $btnSave.Location = New-Object System.Drawing.Point(22, $y)
+    $btnSave.Size = New-Object System.Drawing.Size(260, 36)
+    Style-Button $btnSave 'primary'
+    $btnSave.Add_Click({
+        # Only format is checked here; a well-formed tag that does not exist
+        # shows up as "No profile" in the grid once the lookup runs
+        $bad = 0
+        foreach ($tb in $boxes.Values) {
+            $t = ([string]$tb.Text).Trim()
+            if ($t -and ($t -replace '\s', '') -notmatch '^[^#]{2,}#\d{3,}$') {
+                $bad++
+                $d = $script:Colors.Danger; $g = $script:Colors.GridBack
+                $tb.BackColor = [System.Drawing.Color]::FromArgb([int](($g.R * 3 + $d.R) / 4), [int](($g.G * 3 + $d.G) / 4), [int](($g.B * 3 + $d.B) / 4))
+            }
+        }
+        if ($bad -gt 0) {
+            $lblErr.Text = 'Check the highlighted tag(s) - they should look like Name#1234.'
+            return
+        }
+        $dlg.DialogResult = 'OK'
+    })
+    $dlg.Controls.Add($btnSave)
+
+    $btnLater = New-Object System.Windows.Forms.Button
+    $btnLater.Text = 'Later'
+    $btnLater.Location = New-Object System.Drawing.Point(292, $y)
+    $btnLater.Size = New-Object System.Drawing.Size(266, 36)
+    Style-Button $btnLater 'normal'
+    $btnLater.DialogResult = 'Cancel'
+    $dlg.Controls.Add($btnLater)
+
+    $dlg.AcceptButton = $btnSave; $dlg.CancelButton = $btnLater
+    $dlg.ClientSize = New-Object System.Drawing.Size(580, ($y + 36 + 20))
+
+    $res = $dlg.ShowDialog($script:Form)
+
+    $askAgain = -not $cbNoAsk.Checked
+    if ([bool]$script:Settings.PromptForMissingTags -ne $askAgain) {
+        $script:Settings.PromptForMissingTags = $askAgain
+        Save-Settings
+    }
+
+    $saved = New-Object System.Collections.ArrayList
+    if ($res -eq [System.Windows.Forms.DialogResult]::OK) {
+        foreach ($acct in $missing) {
+            $t = ([string]$boxes[$acct].Text).Trim()
+            if (-not $t) { continue }
+            $meta = Get-AccountMeta $acct
+            $meta.BattleTag = $t
+            $script:AccountStore[$acct] = $meta
+            [void]$saved.Add($acct)
+        }
+        if ($saved.Count -gt 0) {
+            Save-AccountStore
+            foreach ($row in $script:Grid.Rows) {
+                if ($saved -contains [string]$row.Tag) {
+                    $row.Cells['BattleTag'].Value = [string](Get-AccountMeta ([string]$row.Tag)).BattleTag
+                    $row.Cells['BattleTag'].ToolTipText = ''
+                }
+            }
+            Set-Status "Saved $($saved.Count) BattleTag(s)"
+        }
+    }
+    $dlg.Dispose()
+    return $saved.ToArray()
+}
+
+function Start-RankFetchForAccounts {
+    param([string[]]$AccountList)
+    foreach ($row in $script:Grid.Rows) {
+        if ($AccountList -contains [string]$row.Tag) {
+            Start-RankFetch -Row $row -BattleTag ([string]$row.Cells['BattleTag'].Value)
+        }
+    }
+    if ($script:Jobs.Count -gt 0) { Set-Status "Fetching ranks for $($script:Jobs.Count) account(s)..." }
+}
+
+#--------------------------------------
 # SWITCH LOGIC
 #--------------------------------------
 function Confirm-FlaggedSwitch {
@@ -2088,7 +2304,7 @@ function Show-SettingsDialog {
     $dlg.FormBorderStyle = 'FixedDialog'
     $dlg.MaximizeBox = $false; $dlg.MinimizeBox = $false
     $dlg.StartPosition = 'CenterParent'
-    $dlg.Size = New-Object System.Drawing.Size(440, 836)
+    $dlg.Size = New-Object System.Drawing.Size(440, 866)
     $dlg.BackColor = $c.FormBack
     $dlg.ForeColor = $c.Fore
     $dlg.Font = New-Object System.Drawing.Font('Segoe UI', 10)
@@ -2143,6 +2359,7 @@ function Show-SettingsDialog {
         @{ Key = 'ShowPlayerIcons';        Text = 'Show player avatars and namecards' },
         @{ Key = 'ApplyProfileOnSwitch';   Text = 'Apply bound Overwatch settings profile on switch' },
         @{ Key = 'FetchRanksOnStart';      Text = 'Fetch ranks automatically on startup' },
+        @{ Key = 'PromptForMissingTags';   Text = 'Ask for missing BattleTags on startup' },
         @{ Key = 'AutoLaunchBattleNet';    Text = 'Relaunch Battle.net after switching' },
         @{ Key = 'LaunchOverwatch';        Text = 'Launch Overwatch 2 directly after switching' },
         @{ Key = 'CloseOverwatchOnSwitch'; Text = 'Close Overwatch when switching accounts' },
@@ -2233,7 +2450,7 @@ function Show-SettingsDialog {
 
     # Credit to the original project this is forked from
     $lblCredit = New-Object System.Windows.Forms.Label
-    $lblCredit.Text = "Dark Edition v1.2  -  forked from BNetSwitcher by Nepero" + [Environment]::NewLine + "Rank data by OverFast API"
+    $lblCredit.Text = "Dark Edition v1.3  -  forked from BNetSwitcher by Nepero" + [Environment]::NewLine + "Rank data by OverFast API"
     $lblCredit.Location = New-Object System.Drawing.Point($x, $y)
     $lblCredit.Size = New-Object System.Drawing.Size($w, 34)
     $lblCredit.TextAlign = 'MiddleCenter'
@@ -2281,6 +2498,12 @@ $miStatus.Add_Click({ $a = Get-SelectedAccount; if ($a) { Show-StatusDialog $a }
 
 $miProfile = $script:Menu.Items.Add('Overwatch settings profile...')
 $miProfile.Add_Click({ Show-ProfilesDialog })
+
+$miMissing = $script:Menu.Items.Add('Enter missing BattleTags...')
+$miMissing.Add_Click({
+    $new = @(Show-MissingTagsDialog)
+    if ($new.Count -gt 0) { Start-RankFetchForAccounts $new }
+})
 
 $miImport = $script:Menu.Items.Add('Import / export BattleTags...')
 $miImport.Add_Click({ Show-ImportDialog })
@@ -2436,6 +2659,46 @@ $script:Grid.Add_CellPainting({
         return
     }
 
+    #-- BattleTag cell: drawn as an input box so it is obvious where tags go.
+    # An empty one gets a dashed orange outline and an "Add" prompt.
+    if ($colName -eq 'BattleTag') {
+        $e.PaintBackground($e.CellBounds, $true)
+        $b = $e.CellBounds
+        $text = ''
+        if ($null -ne $e.FormattedValue) { $text = [string]$e.FormattedValue }
+        $box = New-Object System.Drawing.Rectangle(($b.X + 5), ($b.Y + 9), ($b.Width - 11), ($b.Height - 19))
+        $textRect = New-Object System.Drawing.Rectangle(($box.X + 8), $box.Y, ($box.Width - 12), $box.Height)
+        $flags = [System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor [System.Windows.Forms.TextFormatFlags]::Left -bor [System.Windows.Forms.TextFormatFlags]::EndEllipsis
+        if ($box.Width -gt 10) {
+            try {
+                if ([string]::IsNullOrWhiteSpace($text)) {
+                    $ac = $script:Colors.Accent
+                    $fill = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(30, $ac.R, $ac.G, $ac.B))
+                    $e.Graphics.FillRectangle($fill, $box)
+                    $fill.Dispose()
+                    $pen = New-Object System.Drawing.Pen($ac, 1.5)
+                    $pen.DashStyle = [System.Drawing.Drawing2D.DashStyle]::Dash
+                    $e.Graphics.DrawRectangle($pen, $box)
+                    $pen.Dispose()
+                    $f = New-Object System.Drawing.Font('Segoe UI Semibold', 9.75)
+                    [System.Windows.Forms.TextRenderer]::DrawText($e.Graphics, '+ Add BattleTag', $f, $textRect, $ac, $flags)
+                    $f.Dispose()
+                } else {
+                    $selected = (($e.State -band [System.Windows.Forms.DataGridViewElementStates]::Selected) -ne 0)
+                    $color = $e.CellStyle.ForeColor
+                    $edge = $script:Colors.Border
+                    if ($selected) { $color = $e.CellStyle.SelectionForeColor; $edge = $script:Colors.Subtle }
+                    $pen = New-Object System.Drawing.Pen($edge, 1)
+                    $e.Graphics.DrawRectangle($pen, $box)
+                    $pen.Dispose()
+                    [System.Windows.Forms.TextRenderer]::DrawText($e.Graphics, $text, $e.CellStyle.Font, $textRect, $color, $flags)
+                }
+            } catch { }
+        }
+        $e.Handled = $true
+        return
+    }
+
     if ($script:RoleColumns -notcontains $colName) { return }
 
     $e.PaintBackground($e.CellBounds, $true)
@@ -2485,6 +2748,7 @@ $script:Grid.Add_CellEndEdit({
 
     if ([string]::IsNullOrWhiteSpace($bt)) {
         $meta.BattleTag = ''
+        $row.Cells['BattleTag'].ToolTipText = $script:AddTagTip
         foreach ($col in $script:RoleColumns) {
             $row.Cells[$col].Value = ''
             $row.Cells[$col].Tag = $null
@@ -2492,11 +2756,44 @@ $script:Grid.Add_CellEndEdit({
         }
     } else {
         $meta.BattleTag = $bt
+        if ($row.Cells['BattleTag'].ToolTipText -eq $script:AddTagTip) { $row.Cells['BattleTag'].ToolTipText = '' }
         if ($bt -notmatch '#') { Set-Status "Tip: BattleTags look like Name#1234 - '$bt' may not be found" }
         Start-RankFetch -Row $row -BattleTag $bt
     }
     $script:AccountStore[$acct] = $meta
     Save-AccountStore
+})
+
+# One click on a BattleTag cell starts typing; full-row selection would
+# otherwise just select the row
+$script:Grid.Add_CellMouseClick({
+    param($sender, $e)
+    if ($e.Button -ne [System.Windows.Forms.MouseButtons]::Left) { return }
+    if ($e.RowIndex -lt 0 -or $e.ColumnIndex -lt 0) { return }
+    if ($sender.Columns[$e.ColumnIndex].Name -ne 'BattleTag') { return }
+    $sender.CurrentCell = $sender.Rows[$e.RowIndex].Cells[$e.ColumnIndex]
+    [void]$sender.BeginEdit($true)
+})
+
+# Same hint inside the edit box while it is empty
+$script:Grid.Add_EditingControlShowing({
+    param($sender, $e)
+    if ($sender.CurrentCell -and $sender.Columns[$sender.CurrentCell.ColumnIndex].Name -eq 'BattleTag' -and
+        $e.Control -is [System.Windows.Forms.TextBox]) {
+        Set-CueBanner $e.Control 'Name#1234'
+    }
+})
+
+# Text cursor over BattleTag cells, so they read as something to type in
+$script:Grid.Add_CellMouseEnter({
+    param($sender, $e)
+    if ($e.RowIndex -ge 0 -and $e.ColumnIndex -ge 0 -and $sender.Columns[$e.ColumnIndex].Name -eq 'BattleTag') {
+        $sender.Cursor = [System.Windows.Forms.Cursors]::IBeam
+    }
+})
+$script:Grid.Add_CellMouseLeave({
+    param($sender, $e)
+    $sender.Cursor = [System.Windows.Forms.Cursors]::Default
 })
 
 # Double-click account name -> switch
@@ -2546,13 +2843,19 @@ $script:PollTimer.Start()
 
 $script:Form.Add_Shown({
     Set-DarkTitleBar -TargetForm $script:Form -Dark $script:Colors.IsDark
+    # Ask before fetching, so tags typed here are looked up in the same pass
+    $newTags = @()
+    if ($script:Settings.PromptForMissingTags -and -not $env:BNS_SMOKETEST) {
+        $newTags = @(Show-MissingTagsDialog -AtStartup $true)
+    }
     if ($script:Settings.FetchRanksOnStart) { Start-AllRankFetches }
+    elseif ($newTags.Count -gt 0) { Start-RankFetchForAccounts $newTags }
     $hasTags = $false
     foreach ($row in $script:Grid.Rows) {
         if (-not [string]::IsNullOrWhiteSpace([string]$row.Cells['BattleTag'].Value)) { $hasTags = $true; break }
     }
     if (-not $hasTags) {
-        Set-Status 'Tip: click a BattleTag cell and type Name#1234 - ranks and icons load automatically'
+        Set-Status 'Tip: click "+ Add BattleTag" on an account and type Name#1234 - ranks and icons load automatically'
     }
 })
 
